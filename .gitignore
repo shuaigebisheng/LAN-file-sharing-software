@@ -1,0 +1,10 @@
+# 忽略 build 整个文件夹
+build/
+
+# 忽略 bin 文件夹
+bin/
+
+# 忽略 .vscode 配置文件夹
+.vscode/
+
+shared/

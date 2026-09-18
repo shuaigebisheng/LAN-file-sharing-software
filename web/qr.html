@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>扫码连接</title>
+<style>
+body{font-family:-apple-system,system-ui,sans-serif;background:#f5f6f8;margin:0;
+     display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;
+     box-sizing:border-box;}
+.card{background:#fff;border-radius:18px;padding:28px 24px;box-shadow:0 4px 20px rgba(0,0,0,.08);
+      text-align:center;max-width:420px;width:100%;}
+h1{font-size:20px;margin:0 0 6px;}
+p{color:#6b7280;font-size:14px;margin:6px 0 18px;}
+.qr{width:260px;height:260px;margin:0 auto 16px;}
+.qr svg{width:100%;height:100%;}
+code{background:#f3f4f6;padding:4px 8px;border-radius:6px;font-size:13px;word-break:break-all;}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>扫码连接</h1>
+  <p>用相机或浏览器扫码</p>
+  <div class="qr">{{QR_SVG}}</div>
+  <p>或直接在设备上访问：<br><code>{{URL}}</code></p>
+</div>
+</body>
+</html>

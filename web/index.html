@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>局域网互传</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <div class="hero-left">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+        </svg>
+      </div>
+      <div>
+        <h1>局域网互传</h1>
+        <p class="sub" id="meLabel">正在识别设备…</p>
+      </div>
+    </div>
+    <div class="peer-pill" id="peerPill" hidden>
+      <span class="dot"></span>
+      <span id="peerPillText">0 台设备在线</span>
+    </div>
+  </header>
+
+  <section class="card send-card">
+    <div class="card-head">
+      <h2>发送文件</h2>
+    </div>
+
+    <div class="send-target">
+      <span class="send-target-label">发送给</span>
+      <div class="target-dropdown" id="targetDropdown">
+        <button type="button" class="target-btn" id="targetBtn" aria-haspopup="listbox" aria-expanded="false">
+          <span class="target-btn-text" id="targetBtnText">所有人（共享）</span>
+          <svg class="target-btn-arrow" width="12" height="8" viewBox="0 0 12 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 2l4 4 4-4"/></svg>
+        </button>
+        <ul class="target-menu" id="targetMenu" hidden role="listbox"></ul>
+      </div>
+      <select id="targetSelect" hidden>
+        <option value="__none__" selected>请选择接收者…</option>
+        <option value="">所有人（共享）</option>
+      </select>
+    </div>
+
+    <label class="dropzone" id="dropzone" for="fileInput">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/>
+        <line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      <span class="dz-label">点击选择文件</span>
+      <span class="dz-hint">或拖拽文件到页面任意位置</span>
+    </label>
+    <input type="file" id="fileInput" multiple hidden>
+
+    <div class="queue" id="queuePanel" hidden>
+      <div class="queue-head">
+        <span class="queue-summary" id="queueSummary"></span>
+        <div class="queue-actions">
+          <button class="mini-btn" id="pauseAllBtn">全部暂停</button>
+          <button class="mini-btn" id="resumeAllBtn">全部继续</button>
+          <button class="mini-btn" id="clearDoneBtn">清除已完成</button>
+          <button class="mini-btn" id="clearAllBtn">全部清除</button>
+        </div>
+      </div>
+      <ul class="queue-list" id="queueList"></ul>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>我的文件</h2>
+      <span class="badge" id="fileCount">0</span>
+    </div>
+    <ul class="file-list" id="fileList"></ul>
+  </section>
+
+  <footer class="foot">
+    <span>只有你和接收者能看到你发送的文件</span>
+  </footer>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
