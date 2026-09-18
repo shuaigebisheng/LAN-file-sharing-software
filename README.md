@@ -43,10 +43,4 @@ LAN sharing software, which enables interconnection among devices such as mobile
 
 ### 运行
 
-```bash
-# 1. 下载或克隆本项目
-git clone https://github.com/yourname/lanshare.git
-cd lanshare
-
-# 2. 启动
 python transfer.py
