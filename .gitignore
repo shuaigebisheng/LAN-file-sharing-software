@@ -8,3 +8,4 @@ bin/
 .vscode/
 
 shared/
+__pycache__/
