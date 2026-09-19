@@ -60,6 +60,11 @@ function escapeHtml(s){
     c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function cssEscape(s){
+  if(window.CSS && CSS.escape) return CSS.escape(s);
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, c => '\\' + c);
+}
+
 function toast(msg){
   const el = document.createElement('div');
   el.textContent = msg;
@@ -87,6 +92,7 @@ function iconSvg(kind){
   if(kind === 'close') return '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   if(kind === 'download') return '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
   if(kind === 'music') return '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+  if(kind === 'check') return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
   return '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
 }
 
@@ -181,6 +187,7 @@ let files = [];
 const TARGET_KEY = 'landrop_target';
 const TARGET_NAME_KEY = 'landrop_target_name';
 const QUEUE_KEY = 'landrop_queue';
+const FILE_FILTER_KEY = 'landrop_file_filter';
 
 const queuePanel = $('queuePanel');
 const queueList = $('queueList');
@@ -193,6 +200,64 @@ const targetDropdown = $('targetDropdown');
 const targetBtn = $('targetBtn');
 const targetBtnText = $('targetBtnText');
 const targetMenu = $('targetMenu');
+
+// 文件筛选状态
+const fileFilter = {
+  category: 'all',
+  search: '',
+  sort: 'mtime_desc',
+};
+
+// 多选状态
+let fileSelectMode = false;
+const selectedFiles = new Set();
+
+// 文件分类 tab 列表
+const FILE_CATEGORIES = [
+  { id: 'all',   label: '全部' },
+  { id: 'img',   label: '图片' },
+  { id: 'vid',   label: '视频' },
+  { id: 'aud',   label: '音频' },
+  { id: 'doc',   label: '文档' },
+  { id: 'zip',   label: '压缩包' },
+  { id: 'other', label: '其他' },
+];
+
+const FILE_SORT_OPTIONS = [
+  { id: 'mtime_desc', label: '最新上传' },
+  { id: 'mtime_asc',  label: '最早上传' },
+  { id: 'size_desc',  label: '大文件优先' },
+  { id: 'size_asc',   label: '小文件优先' },
+  { id: 'name_asc',   label: '名称 A → Z' },
+  { id: 'name_desc',  label: '名称 Z → A' },
+];
+
+const CATEGORY_EXT_MAP = {
+  img: new Set(['jpg','jpeg','png','gif','webp','heic','bmp','svg','avif','ico']),
+  vid: new Set(['mp4','mov','mkv','avi','webm','flv','wmv','m4v']),
+  aud: new Set(['mp3','wav','flac','aac','m4a','ogg','opus']),
+  doc: new Set([
+    'pdf',
+    'doc','docx','rtf','odt',
+    'xls','xlsx','csv','ods',
+    'ppt','pptx','odp',
+    'txt','md','markdown','log',
+    'js','mjs','ts','tsx','jsx','py','rb','go','rs','java','kt','swift',
+    'c','cc','cpp','h','hpp','cs','php','sh','bash','zsh','sql',
+    'html','htm','css','scss','less','xml','json','yaml','yml','toml',
+    'ini','conf','cfg','env','vue','svelte'
+  ]),
+  zip: new Set(['zip','rar','7z','tar','gz','bz2','xz']),
+};
+
+const FILE_SORTERS = {
+  mtime_desc: (a, b) => b.mtime - a.mtime,
+  mtime_asc:  (a, b) => a.mtime - b.mtime,
+  size_desc:  (a, b) => b.size - a.size,
+  size_asc:   (a, b) => a.size - b.size,
+  name_asc:   (a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN', { numeric: true }),
+  name_desc:  (a, b) => b.name.localeCompare(a.name, 'zh-Hans-CN', { numeric: true }),
+};
 
 let pendingRestoreId = null;
 let pendingBatchRestore = false;
@@ -317,7 +382,6 @@ function refreshTargetUI(){
   const idx = targetSelect.selectedIndex;
   const cur = idx >= 0 ? targetSelect.options[idx] : null;
 
-  // 按钮文字
   let btnText = '所有人（共享）';
   if(cur){
     if(cur.dataset.offline === '1'){
@@ -330,7 +394,6 @@ function refreshTargetUI(){
   }
   targetBtnText.textContent = btnText;
 
-  // 列表
   targetMenu.innerHTML = '';
   for(const opt of targetSelect.options){
     if(opt.value === '__none__') continue;
@@ -382,7 +445,6 @@ function openTargetMenu(){
   refreshTargetUI();
   targetMenu.hidden = false;
   targetBtn.setAttribute('aria-expanded', 'true');
-  // 延迟绑定，避免本次点击立即触发 close
   setTimeout(() => {
     document.addEventListener('click', onDocClickClose, true);
     document.addEventListener('keydown', onEscClose, true);
@@ -902,43 +964,456 @@ $('clearDoneBtn').onclick = clearDone;
 $('clearAllBtn').onclick = clearAll;
 
 /* =========================================================
+   文件列表：过滤 / 分类 / 排序
+   ========================================================= */
+
+const fileSearch = $('fileSearch');
+const fileSearchClear = $('fileSearchClear');
+const fileTabs = $('fileTabs');
+const fileSortDropdown = $('fileSortDropdown');
+const fileSortBtn = $('fileSortBtn');
+const fileSortLabel = $('fileSortLabel');
+const fileSortMenu = $('fileSortMenu');
+
+// 多选相关 DOM
+const fileHeadNormal = $('fileHeadNormal');
+const fileHeadSelect = $('fileHeadSelect');
+const fileSelectBtn = $('fileSelectBtn');
+const fileSelectExitBtn = $('fileSelectExitBtn');
+const fileSelectedInfo = $('fileSelectedInfo');
+const fileSelectAllBtn = $('fileSelectAllBtn');
+const fileZipBtn = $('fileZipBtn');
+const filesCard = document.querySelector('.files-card');
+
+function fileCategory(name){
+  const ext = extOf(name);
+  for(const [cat, set] of Object.entries(CATEGORY_EXT_MAP)){
+    if(set.has(ext)) return cat;
+  }
+  return 'other';
+}
+
+function getFilteredSortedFiles(){
+  let list = files.slice();
+
+  if(fileFilter.category !== 'all'){
+    list = list.filter(f => fileCategory(f.name) === fileFilter.category);
+  }
+
+  const q = fileFilter.search.trim().toLowerCase();
+  if(q){
+    list = list.filter(f => f.name.toLowerCase().includes(q));
+  }
+
+  const sorter = FILE_SORTERS[fileFilter.sort] || FILE_SORTERS.mtime_desc;
+  list.sort(sorter);
+
+  return list;
+}
+
+function updateFileTabCounts(){
+  const counts = { all: files.length, other: 0 };
+  for(const cat of Object.keys(CATEGORY_EXT_MAP)) counts[cat] = 0;
+
+  for(const f of files){
+    const cat = fileCategory(f.name);
+    counts[cat] = (counts[cat] || 0) + 1;
+  }
+
+  const tabs = fileTabs.querySelectorAll('.files-tab');
+  for(const tab of tabs){
+    const cat = tab.dataset.cat;
+    const cnt = counts[cat] || 0;
+    const cntEl = tab.querySelector('.files-tab-count');
+    if(cntEl) cntEl.textContent = cnt;
+    tab.classList.toggle('is-active', cat === fileFilter.category);
+  }
+}
+
+function pruneSelected(){
+  const valid = new Set(files.map(f => f.name));
+  for(const n of Array.from(selectedFiles)){
+    if(!valid.has(n)) selectedFiles.delete(n);
+  }
+}
+
+function renderFiles(){
+  fileCount.textContent = files.length;
+  updateFileTabCounts();
+
+  pruneSelected();
+
+  const list = getFilteredSortedFiles();
+
+  if(!list.length){
+    if(!files.length){
+      fileList.innerHTML =
+        '<li class="empty">' +
+        '<div class="empty-icon">' +
+        '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>' +
+        '<polyline points="14 2 14 8 20 8"/></svg>' +
+        '</div>' +
+        '还没有文件</li>';
+    } else {
+      const li = document.createElement('li');
+      li.className = 'files-no-result';
+      li.textContent = fileFilter.search
+        ? '没有匹配的文件'
+        : '该分类下暂无文件';
+      fileList.innerHTML = '';
+      fileList.appendChild(li);
+    }
+  } else {
+    fileList.innerHTML = '';
+    for(const f of list) fileList.appendChild(buildFileEl(f));
+  }
+
+  updateFileSelectInfo();
+}
+
+/* ---- 搜索框 ---- */
+fileSearch.addEventListener('input', () => {
+  fileFilter.search = fileSearch.value;
+  fileSearchClear.hidden = !fileSearch.value;
+  renderFiles();
+});
+fileSearchClear.addEventListener('click', () => {
+  fileSearch.value = '';
+  fileFilter.search = '';
+  fileSearchClear.hidden = true;
+  renderFiles();
+  fileSearch.focus();
+});
+
+/* ---- 分类 tabs ---- */
+fileTabs.addEventListener('click', e => {
+  const tab = e.target.closest('.files-tab');
+  if(!tab) return;
+  const cat = tab.dataset.cat;
+  if(fileFilter.category === cat) return;
+  fileFilter.category = cat;
+  saveFileFilter();
+  renderFiles();
+});
+
+/* ---- 排序下拉 ---- */
+function refreshFileSortUI(){
+  const cur = FILE_SORT_OPTIONS.find(o => o.id === fileFilter.sort)
+              || FILE_SORT_OPTIONS[0];
+  fileSortLabel.textContent = cur.label;
+
+  fileSortMenu.innerHTML = '';
+  for(const opt of FILE_SORT_OPTIONS){
+    const li = document.createElement('li');
+    li.className = 'files-sort-item';
+    li.dataset.id = opt.id;
+    li.setAttribute('role', 'option');
+    if(opt.id === fileFilter.sort){
+      li.classList.add('sel');
+      li.setAttribute('aria-selected', 'true');
+    }
+    const check = document.createElement('div');
+    check.className = 'files-sort-item-check';
+    check.textContent = (opt.id === fileFilter.sort) ? '✓' : '';
+    const lbl = document.createElement('div');
+    lbl.className = 'files-sort-item-label';
+    lbl.textContent = opt.label;
+    li.append(check, lbl);
+
+    li.addEventListener('click', e => {
+      e.stopPropagation();
+      if(fileFilter.sort !== opt.id){
+        fileFilter.sort = opt.id;
+        saveFileFilter();
+        refreshFileSortUI();
+        renderFiles();
+      }
+      closeFileSortMenu();
+    });
+    fileSortMenu.appendChild(li);
+  }
+}
+
+function openFileSortMenu(){
+  refreshFileSortUI();
+  fileSortMenu.hidden = false;
+  fileSortBtn.setAttribute('aria-expanded', 'true');
+  setTimeout(() => {
+    document.addEventListener('click', onDocClickFileSort, true);
+    document.addEventListener('keydown', onEscFileSort, true);
+  }, 0);
+}
+
+function closeFileSortMenu(){
+  if(fileSortMenu.hidden) return;
+  fileSortMenu.hidden = true;
+  fileSortBtn.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('click', onDocClickFileSort, true);
+  document.removeEventListener('keydown', onEscFileSort, true);
+}
+
+function onDocClickFileSort(e){
+  if(!fileSortMenu.hidden && !e.target.closest('#fileSortDropdown')){
+    closeFileSortMenu();
+  }
+}
+
+function onEscFileSort(e){
+  if(e.key === 'Escape' && !fileSortMenu.hidden){
+    e.preventDefault();
+    closeFileSortMenu();
+  }
+}
+
+fileSortBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  if(fileSortMenu.hidden) openFileSortMenu();
+  else closeFileSortMenu();
+});
+
+/* ---- 筛选状态持久化 ---- */
+function loadFileFilter(){
+  try{
+    const raw = localStorage.getItem(FILE_FILTER_KEY);
+    if(!raw) return;
+    const data = JSON.parse(raw);
+    if(!data || typeof data !== 'object') return;
+    if(data.category && FILE_CATEGORIES.some(c => c.id === data.category)){
+      fileFilter.category = data.category;
+    }
+    if(data.sort && FILE_SORT_OPTIONS.some(s => s.id === data.sort)){
+      fileFilter.sort = data.sort;
+    }
+  }catch(e){}
+}
+
+function saveFileFilter(){
+  try{
+    localStorage.setItem(FILE_FILTER_KEY, JSON.stringify({
+      category: fileFilter.category,
+      sort: fileFilter.sort,
+    }));
+  }catch(e){}
+}
+
+/* =========================================================
+   多选模式
+   ========================================================= */
+
+function updateFileSelectInfo(){
+  const n = selectedFiles.size;
+  fileSelectedInfo.textContent = '已选 ' + n + ' 项';
+
+  // "打包下载"按钮状态
+  fileZipBtn.disabled = (n === 0);
+
+  // "全选"按钮文字
+  const list = getFilteredSortedFiles();
+  const allSelected = list.length > 0 &&
+                      list.every(f => selectedFiles.has(f.name));
+  fileSelectAllBtn.textContent = allSelected ? '取消全选' : '全选';
+}
+
+function enterFileSelectMode(){
+  fileSelectMode = true;
+  filesCard.classList.add('select-mode');
+  fileHeadNormal.hidden = true;
+  fileHeadSelect.hidden = false;
+  renderFiles();
+}
+
+function exitFileSelectMode(){
+  fileSelectMode = false;
+  selectedFiles.clear();
+  filesCard.classList.remove('select-mode');
+  fileHeadNormal.hidden = false;
+  fileHeadSelect.hidden = true;
+  renderFiles();
+}
+
+function toggleFileSelection(name){
+  if(selectedFiles.has(name)) selectedFiles.delete(name);
+  else selectedFiles.add(name);
+
+  const item = fileList.querySelector(
+    '.file-item[data-name="' + cssEscape(name) + '"]'
+  );
+  if(item){
+    const now = selectedFiles.has(name);
+    item.classList.toggle('selected', now);
+
+    // ★ 同步更新复选框内的对勾 SVG，避免等到下次轮询才出现
+    const chk = item.querySelector('.file-check');
+    if(chk){
+      chk.innerHTML = now
+        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+        : '';
+    }
+  }
+
+  updateFileSelectInfo();
+}
+
+function toggleSelectAll(){
+  const list = getFilteredSortedFiles();
+  const allSelected = list.length > 0 &&
+                      list.every(f => selectedFiles.has(f.name));
+  if(allSelected){
+    for(const f of list) selectedFiles.delete(f.name);
+  } else {
+    for(const f of list) selectedFiles.add(f.name);
+  }
+  renderFiles();
+}
+
+async function downloadSelectedAsZip(){
+  const names = Array.from(selectedFiles);
+  if(!names.length) return;
+
+  const btn = fileZipBtn;
+  const origHTML = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '打包中…';
+
+  try{
+    const res = await fetch('/api/zip', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ names }),
+    });
+
+    if(!res.ok){
+      let msg = 'HTTP ' + res.status;
+      try{
+        const j = await res.json();
+        if(j && j.error) msg = j.error;
+      }catch(e){}
+      toast('打包失败：' + msg);
+      return;
+    }
+
+    const blob = await res.blob();
+
+    let filename = 'lanshare.zip';
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+    if(m){
+      try{ filename = decodeURIComponent(m[1]); }catch(e){}
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+
+    toast('已开始下载 ' + names.length + ' 个文件');
+    exitFileSelectMode();
+  }catch(e){
+    toast('打包失败：' + (e.message || '未知错误'));
+  }finally{
+    btn.innerHTML = origHTML;
+    updateFileSelectInfo();
+  }
+}
+
+fileSelectBtn.addEventListener('click', enterFileSelectMode);
+fileSelectExitBtn.addEventListener('click', exitFileSelectMode);
+fileSelectAllBtn.addEventListener('click', toggleSelectAll);
+fileZipBtn.addEventListener('click', downloadSelectedAsZip);
+
+/* =========================================================
    文件列表
    ========================================================= */
+
+let _lastFilesKey = null;
 
 async function refreshFiles(){
   try{
     const res = await fetch('/api/files', {cache: 'no-store'});
     const list = await res.json();
+
+    // ★ 指纹：内容完全相同时跳过重绘，避免 iPad 上缩略图闪烁
+    const key = list.map(f =>
+      f.name + '\x00' + f.mtime + '\x00' + f.size + '\x00' +
+      (f.to_clients || []).join(',') + '\x00' + (f.is_mine ? '1' : '0')
+    ).join('\x01');
+
+    if(key === _lastFilesKey){
+      return;                // 无变化，不动 DOM
+    }
+    _lastFilesKey = key;
+
     files = list;
     renderFiles();
   }catch(e){}
 }
 
-function renderFiles(){
-  fileCount.textContent = files.length;
-  if(!files.length){
-    fileList.innerHTML =
-      '<li class="empty">' +
-      '<div class="empty-icon">' +
-      '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
-      '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>' +
-      '<polyline points="14 2 14 8 20 8"/></svg>' +
-      '</div>' +
-      '还没有文件</li>';
-    return;
+function buildFileIcon(f){
+  const kind = previewKind(f.name);
+  const [cls, ext] = fileExtClass(f.name);
+
+  // 图片：显示真实缩略图
+  if(kind === 'image'){
+    const wrap = document.createElement('div');
+    wrap.className = 'file-thumb';
+    wrap.title = '点击预览';
+    wrap.style.cursor = 'pointer';
+    wrap.onclick = (e) => {
+      e.stopPropagation();
+      openPreview(f);
+    };
+
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.alt = '';
+    img.src = '/thumb/' + encodeURIComponent(f.name) + '?v=' + (f.mtime || 0);
+
+    // 加载失败（如 Chrome 遇 HEIC）→ 回退成图标
+    img.onerror = () => {
+      wrap.className = 'file-icon' + (cls ? ' ' + cls : '');
+      wrap.removeAttribute('title');
+      wrap.style.cursor = '';
+      wrap.onclick = null;
+      wrap.innerHTML = '';
+      wrap.textContent = ext;
+    };
+
+    wrap.appendChild(img);
+    return wrap;
   }
-  fileList.innerHTML = '';
-  for(const f of files) fileList.appendChild(buildFileEl(f));
+
+  // 其他类型：沿用原图标
+  const icon = document.createElement('div');
+  icon.className = 'file-icon' + (cls ? ' ' + cls : '');
+  icon.textContent = ext;
+  return icon;
 }
 
 function buildFileEl(f){
   const li = document.createElement('li');
   li.className = 'file-item';
+  li.dataset.name = f.name;
 
-  const [cls, ext] = fileExtClass(f.name);
-  const icon = document.createElement('div');
-  icon.className = 'file-icon' + (cls ? ' ' + cls : '');
-  icon.textContent = ext;
+  const isSelected = selectedFiles.has(f.name);
+  if(isSelected) li.classList.add('selected');
+
+  // 选择模式下显示复选框，否则显示缩略图 / 图标
+  let leading;
+  if(fileSelectMode){
+    leading = document.createElement('div');
+    leading.className = 'file-check';
+    leading.innerHTML = isSelected
+      ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+      : '';
+  } else {
+    leading = buildFileIcon(f);
+  }
 
   const meta = document.createElement('div');
   meta.className = 'file-meta';
@@ -946,8 +1421,10 @@ function buildFileEl(f){
   const nameEl = document.createElement('div');
   nameEl.className = 'file-name';
   nameEl.textContent = f.name;
-  nameEl.title = '点击预览';
-  nameEl.onclick = () => openPreview(f);
+  nameEl.title = fileSelectMode ? '点击选择' : '点击预览';
+  if(!fileSelectMode){
+    nameEl.onclick = () => openPreview(f);
+  }
 
   const info = document.createElement('div');
   info.className = 'file-info';
@@ -1009,7 +1486,17 @@ function buildFileEl(f){
     actions.appendChild(permBtn);
   }
 
-  li.append(icon, meta, actions);
+  li.append(leading, meta, actions);
+
+  // 选择模式下：点击整行切换选中
+  if(fileSelectMode){
+    li.addEventListener('click', e => {
+      // 忽略内部按钮/链接
+      if(e.target.closest('button, a')) return;
+      toggleFileSelection(f.name);
+    });
+  }
+
   return li;
 }
 
@@ -1134,7 +1621,6 @@ function openPreview(file){
     body.appendChild(wrap);
     previewCleanupFns.push(() => { try{ a.pause(); a.src = ''; }catch(e){} });
   } else if(kind === 'pdf'){
-    // 用 PDF.js 渲染，绕开浏览器对 PDF 内联预览的支持差异
     const wrap = document.createElement('div');
     wrap.className = 'preview-pdfjs';
     body.appendChild(wrap);
@@ -1543,10 +2029,12 @@ document.addEventListener('drop', e => {
    启动
    ========================================================= */
 
+loadFileFilter();
 restoreQueue();
 refreshClients();
 refreshFiles();
 refreshTargetUI();
+refreshFileSortUI();
 
 setInterval(refreshClients, 3000);
 setInterval(refreshFiles, 4000);

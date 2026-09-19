@@ -219,7 +219,6 @@ h1{
 }
 .target-btn[aria-expanded="true"] .target-btn-arrow{transform:rotate(180deg);}
 
-/* 下拉面板：绝对定位在按钮正下方 */
 .target-menu{
   position:absolute;
   top:calc(100% + 6px);
@@ -367,6 +366,204 @@ h1{
   font-variant-numeric:tabular-nums;
 }
 .qmeta-status{text-align:right;word-break:break-all;}
+
+/* =====================================================================
+   共享文件：工具栏（搜索 + 排序）
+   ===================================================================== */
+.files-toolbar{
+  display:flex;
+  gap:8px;
+  margin-bottom:10px;
+}
+
+.files-search{
+  flex:1 1 auto;
+  min-width:0;
+  position:relative;
+  display:flex;
+  align-items:center;
+}
+.files-search-icon{
+  position:absolute;
+  left:11px;
+  color:var(--dim);
+  pointer-events:none;
+}
+.files-search input{
+  width:100%;
+  -webkit-appearance:none;
+  appearance:none;
+  padding:8px 34px 8px 34px;
+  border:1px solid var(--border-2);
+  border-radius:var(--radius-sm);
+  background:var(--bg-sub);
+  color:var(--text);
+  font-family:inherit;
+  font-size:13.5px;
+  transition:border-color .15s,box-shadow .15s,background .15s;
+}
+.files-search input::-webkit-search-cancel-button,
+.files-search input::-webkit-search-decoration{
+  -webkit-appearance:none;appearance:none;display:none;
+}
+.files-search input:focus{
+  outline:none;
+  border-color:var(--accent);
+  box-shadow:var(--ring);
+  background:var(--card);
+}
+.files-search input::placeholder{color:var(--dim-2);}
+
+.files-search-clear{
+  position:absolute;
+  right:6px;
+  width:24px;height:24px;
+  border:none;background:transparent;
+  display:grid;place-items:center;
+  color:var(--dim);
+  cursor:pointer;border-radius:6px;
+  transition:background .15s,color .15s;
+  padding:0;
+}
+.files-search-clear:hover{background:var(--bg);color:var(--text);}
+
+/* 排序下拉 */
+.files-sort{position:relative;flex:0 0 auto;}
+.files-sort-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:8px 11px;
+  border:1px solid var(--border-2);
+  border-radius:var(--radius-sm);
+  background:var(--bg-sub);
+  color:var(--text);
+  font-family:inherit;font-size:13px;font-weight:500;
+  cursor:pointer;
+  transition:border-color .15s,box-shadow .15s,background .15s;
+  white-space:nowrap;
+}
+.files-sort-btn:hover{border-color:var(--border-strong);}
+.files-sort-btn:focus{outline:none;}
+.files-sort-btn[aria-expanded="true"]{
+  border-color:var(--accent);
+  background:var(--card);
+  box-shadow:var(--ring);
+}
+.files-sort-btn > svg:first-child{color:var(--dim);flex:0 0 auto;}
+.files-sort-arrow{
+  color:var(--dim);
+  transition:transform .18s;
+  flex:0 0 auto;
+}
+.files-sort-btn[aria-expanded="true"] .files-sort-arrow{transform:rotate(180deg);}
+
+.files-sort-menu{
+  position:absolute;
+  top:calc(100% + 6px);
+  right:0;
+  min-width:170px;
+  z-index:60;
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow-lg);
+  padding:4px;
+  margin:0;list-style:none;
+  max-height:60vh;overflow-y:auto;
+  animation:dropdown-in .14s ease-out;
+}
+.files-sort-item{
+  display:flex;align-items:center;gap:10px;
+  padding:9px 12px;
+  border-radius:var(--radius-xs);
+  cursor:pointer;
+  font-size:13.5px;
+  color:var(--text);
+  transition:background .12s;
+  min-height:36px;
+}
+.files-sort-item:hover{background:var(--accent-soft);}
+.files-sort-item.sel{background:var(--accent-soft);}
+.files-sort-item-check{
+  width:14px;text-align:center;
+  color:var(--accent);font-weight:700;
+  flex:0 0 auto;
+}
+.files-sort-item-label{flex:1;min-width:0;white-space:nowrap;}
+
+/* 分类 tabs */
+.files-tabs{
+  display:flex;
+  gap:6px;
+  margin-bottom:12px;
+  overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+  padding-bottom:2px;
+  scrollbar-width:none;
+}
+.files-tabs::-webkit-scrollbar{display:none;}
+
+.files-tab{
+  flex:0 0 auto;
+  display:inline-flex;align-items:center;gap:5px;
+  padding:6px 12px;
+  border:1px solid var(--border-2);
+  border-radius:999px;
+  background:var(--card);
+  color:var(--text-2);
+  font-family:inherit;font-size:12.5px;font-weight:500;
+  cursor:pointer;
+  transition:background .15s,border-color .15s,color .15s;
+  white-space:nowrap;
+}
+.files-tab:hover{background:var(--bg);border-color:var(--accent);color:var(--accent);}
+.files-tab.is-active{
+  background:var(--accent);
+  border-color:var(--accent);
+  color:#fff;
+}
+.files-tab.is-active:hover{
+  background:var(--accent-hover);
+  border-color:var(--accent-hover);
+  color:#fff;
+}
+.files-tab-count{
+  font-size:10.5px;
+  font-variant-numeric:tabular-nums;
+  padding:0 6px;
+  min-width:18px;
+  height:16px;
+  line-height:16px;
+  text-align:center;
+  border-radius:999px;
+  background:var(--bg-sub);
+  color:var(--dim);
+  transition:background .15s,color .15s;
+}
+.files-tab.is-active .files-tab-count{
+  background:rgba(255,255,255,.25);
+  color:#fff;
+}
+
+.files-no-result{
+  text-align:center;
+  padding:36px 16px;
+  color:var(--dim);
+  font-size:13.5px;
+  list-style:none;
+}
+
+/* 小屏 */
+@media (max-width:600px){
+  .files-sort-btn span{display:none;}
+  .files-sort-btn{padding:8px 10px;}
+  .files-tab{padding:6px 10px;}
+  .files-tab-count{
+    /* 保留计数在"全部"上，其他隐藏以免过于拥挤 */
+    display:none;
+  }
+  .files-tab[data-cat="all"] .files-tab-count{display:inline-block;}
+  .files-search input{font-size:16px;}   /* 防 iOS 自动缩放 */
+}
 
 /* =====================================================================
    文件列表
@@ -809,4 +1006,265 @@ h1{
   .preview-modal.kind-video .preview-body{padding:0;}
   .preview-modal.kind-pdf .preview-body{padding:0;}
   .preview-audio-wrap{max-width:100%;padding:24px 20px;}
+}
+/* =====================================================================
+   共享文件卡头操作区（多选模式）
+   ===================================================================== */
+.card-head-actions{
+  display:flex;align-items:center;gap:8px;
+  flex-wrap:wrap;justify-content:flex-end;
+}
+.file-head-normal,
+.file-head-select{
+  display:flex;align-items:center;gap:8px;
+}
+.file-head-select{flex-wrap:wrap;justify-content:flex-end;}
+
+.files-select-btn{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:5px 10px;
+  border:1px solid var(--border-2);
+  border-radius:var(--radius-xs);
+  background:var(--card);
+  color:var(--text-2);
+  font-family:inherit;font-size:12.5px;font-weight:500;
+  cursor:pointer;
+  transition:background .15s,border-color .15s,color .15s;
+  white-space:nowrap;
+}
+.files-select-btn:hover{background:var(--bg);border-color:var(--accent);color:var(--accent);}
+.files-select-btn svg{flex:0 0 auto;}
+
+.files-selected-info{
+  font-size:12.5px;color:var(--dim);font-weight:500;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+
+/* 主按钮风格的 mini-btn */
+.mini-btn.primary{
+  background:var(--accent);
+  border-color:var(--accent);
+  color:#fff;
+  font-weight:600;
+}
+.mini-btn.primary:hover{
+  background:var(--accent-hover);
+  border-color:var(--accent-hover);
+  color:#fff;
+}
+.mini-btn.primary:disabled{
+  opacity:.45;
+  cursor:not-allowed;
+  background:var(--accent);
+  border-color:var(--accent);
+}
+
+/* =====================================================================
+   文件行：多选复选框
+   ===================================================================== */
+.file-check{
+  flex:0 0 22px;
+  width:22px;height:22px;
+  border-radius:6px;
+  border:1.5px solid var(--border-2);
+  background:var(--card);
+  display:grid;place-items:center;
+  color:transparent;
+  transition:background .15s,border-color .15s,color .15s;
+  user-select:none;
+}
+.file-item.selected .file-check{
+  background:var(--accent);
+  border-color:var(--accent);
+  color:#fff;
+}
+.file-item.selected{
+  background:var(--accent-soft);
+}
+.file-item.selected:hover{
+  background:var(--accent-soft-2);
+}
+
+/* 选择模式下：整行可点击，隐藏右侧操作按钮 */
+.files-card.select-mode .file-actions{
+  display:none;
+}
+.files-card.select-mode .file-item{
+  cursor:pointer;
+}
+.files-card.select-mode .file-name{
+  cursor:pointer;
+  color:var(--text);
+}
+
+/* 小屏：选择模式收起不必要的文字 */
+@media (max-width:600px){
+  .files-select-btn-text{display:none;}
+  .files-select-btn{padding:6px 8px;}
+  .file-zip-text{display:none;}
+  .mini-btn.primary svg{margin-right:0 !important;}
+}
+/* =====================================================================
+   小屏：共享文件卡头
+   - 无论普通 / 多选模式，都强制一行（空间不足时内部元素收缩，不换行）
+   ===================================================================== */
+@media (max-width:600px){
+
+  /* 卡头强制单行，不换行 */
+  .files-card .card-head{
+    flex-wrap:nowrap;
+    align-items:center;
+    gap:8px;
+    margin-bottom:12px;
+  }
+
+  /* 操作区占据剩余空间，靠右 */
+  .files-card .card-head-actions{
+    flex:1 1 auto;
+    min-width:0;
+    justify-content:flex-end;
+    width:auto;                /* ★ 关键：不再占满整行 */
+  }
+
+  /* 普通模式内部：数量徽章 + 多选按钮 */
+  .files-card .file-head-normal{
+    flex-wrap:nowrap;
+    justify-content:flex-end;
+    gap:6px;
+    min-width:0;
+  }
+
+  /* 多选模式内部：已选信息 + 全选 + 打包 + 关闭，禁止换行 */
+  .files-card .file-head-select{
+    flex-wrap:nowrap;
+    justify-content:flex-end;
+    gap:6px;
+    min-width:0;
+    width:auto;
+  }
+
+  /* "已选 X 项" 允许收缩，超出省略 */
+  .files-card .files-selected-info{
+    flex:0 1 auto;
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+    text-align:right;
+  }
+
+  /* 按钮固定尺寸，不参与收缩 */
+  .files-card .mini-btn,
+  .files-card .files-select-btn{
+    flex:0 0 auto;
+    padding:5px 8px;
+    font-size:12px;
+  }
+}
+/* =====================================================================
+   文件缩略图（图片类）
+   ===================================================================== */
+.file-thumb{
+  flex:0 0 40px;
+  width:40px;height:40px;
+  border-radius:10px;
+  overflow:hidden;
+  background:var(--bg-sub);
+  display:grid;place-items:center;
+  position:relative;
+  user-select:none;
+  transition:transform .15s, box-shadow .15s;
+}
+.file-thumb:hover{
+  transform:scale(1.04);
+  box-shadow:0 2px 8px rgba(15,23,42,.12);
+}
+.file-thumb img{
+  width:100%;height:100%;
+  object-fit:cover;
+  display:block;
+  image-rendering:auto;
+}
+
+/* 深色模式下让缩略图有点边框，不然浅色图片看不清边界 */
+@media (prefers-color-scheme: dark){
+  .file-thumb{
+    box-shadow:0 0 0 1px rgba(255,255,255,.05) inset;
+  }
+}
+/* =====================================================================
+   小屏：共享文件列表更紧凑
+   - 隐藏"来自 xxx"（宽屏才有空间展示）
+   - 文件名限一行，超出省略
+   - 缩小缩略图与内边距
+   ===================================================================== */
+@media (max-width:600px){
+
+  /* 行内边距收紧 */
+  .file-item{
+    padding:9px 8px;
+    margin:0 -8px;
+    gap:10px;
+  }
+
+  /* 缩略图 / 图标 缩到 40 依然清晰，但更紧凑 */
+  .file-icon,
+  .file-thumb{
+    flex:0 0 40px;
+    width:40px;
+    height:40px;
+    border-radius:9px;
+  }
+
+  /* 文件名只显示一行，超出省略 */
+  .file-name{
+    font-size:13.5px;
+    -webkit-line-clamp:1;
+    line-clamp:1;
+  }
+
+  /* 文件信息：单行，允许横向滚动不换行 */
+  .file-info{
+    font-size:11px;
+    margin-top:2px;
+    gap:5px;
+    flex-wrap:nowrap;
+    overflow:hidden;
+    white-space:nowrap;
+    /* 多出来的信息用省略号 */
+    text-overflow:ellipsis;
+  }
+
+  /* 隐藏"来自 xxx"（手机上信息密度太挤） */
+  .file-info > span:has(+ .sep) + .sep,
+  .file-info > .sep:has(+ span:not(.pill)) ~ span:not(.pill){
+    /* 这是兜底，真正的隐藏用下面的规则 */
+  }
+
+  /* ★ 关键：隐藏"来自 xxx"文本节点 */
+  .file-info > span:not(.pill):not(.sep){
+    /* 通过顺序控制：第 1 个 span 是大小，第 2 个是时间，第 3 个是"来自 xxx"
+       用 nth-of-type 精确控制 */
+  }
+  .file-info > span:not(.pill):nth-of-type(n+3){
+    display:none;      /* 隐藏第 3 个及之后的普通 span */
+  }
+  /* 相应的分隔符也隐藏 */
+  .file-info > .sep:nth-of-type(n+2){
+    display:none;
+  }
+
+  /* pill 更小更紧凑 */
+  .file-info .pill{
+    font-size:10px;
+    padding:1px 6px;
+    flex:0 0 auto;
+  }
+
+  /* 右侧操作按钮小一点 */
+  .file-actions{gap:5px;}
+  .icon-btn{
+    width:32px;height:32px;border-radius:8px;
+  }
 }

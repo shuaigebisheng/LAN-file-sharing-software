@@ -73,11 +73,73 @@
     </div>
   </section>
 
-  <section class="card">
+  <section class="card files-card">
     <div class="card-head">
-      <h2>我的文件</h2>
-      <span class="badge" id="fileCount">0</span>
+      <h2>共享文件</h2>
+      <div class="card-head-actions">
+        <div class="file-head-normal" id="fileHeadNormal">
+          <span class="badge" id="fileCount">0</span>
+          <button type="button" class="files-select-btn" id="fileSelectBtn" title="多选">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            <span class="files-select-btn-text">多选</span>
+          </button>
+        </div>
+        <div class="file-head-select" id="fileHeadSelect" hidden>
+          <span class="files-selected-info" id="fileSelectedInfo">已选 0 项</span>
+          <button type="button" class="mini-btn" id="fileSelectAllBtn">全选</button>
+          <button type="button" class="mini-btn primary" id="fileZipBtn" disabled>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span class="file-zip-text">打包下载</span>
+          </button>
+          <button type="button" class="files-select-btn" id="fileSelectExitBtn" title="退出多选">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>
     </div>
+
+    <div class="files-toolbar">
+      <div class="files-search">
+        <svg class="files-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="search" id="fileSearch" placeholder="搜索文件名…" autocomplete="off" spellcheck="false" enterkeyhint="search">
+        <button type="button" class="files-search-clear" id="fileSearchClear" hidden aria-label="清除">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <div class="files-sort" id="fileSortDropdown">
+        <button type="button" class="files-sort-btn" id="fileSortBtn" aria-haspopup="listbox" aria-expanded="false" title="排序">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
+          <span id="fileSortLabel">最新上传</span>
+          <svg class="files-sort-arrow" width="10" height="6" viewBox="0 0 12 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 2l4 4 4-4"/></svg>
+        </button>
+        <ul class="files-sort-menu" id="fileSortMenu" hidden role="listbox"></ul>
+      </div>
+    </div>
+
+    <div class="files-tabs" id="fileTabs" role="tablist">
+      <button type="button" class="files-tab is-active" data-cat="all" role="tab">
+        <span>全部</span><span class="files-tab-count" data-cat-count="all">0</span>
+      </button>
+      <button type="button" class="files-tab" data-cat="img" role="tab">
+        <span>图片</span><span class="files-tab-count" data-cat-count="img">0</span>
+      </button>
+      <button type="button" class="files-tab" data-cat="vid" role="tab">
+        <span>视频</span><span class="files-tab-count" data-cat-count="vid">0</span>
+      </button>
+      <button type="button" class="files-tab" data-cat="aud" role="tab">
+        <span>音频</span><span class="files-tab-count" data-cat-count="aud">0</span>
+      </button>
+      <button type="button" class="files-tab" data-cat="doc" role="tab">
+        <span>文档</span><span class="files-tab-count" data-cat-count="doc">0</span>
+      </button>
+      <button type="button" class="files-tab" data-cat="zip" role="tab">
+        <span>压缩包</span><span class="files-tab-count" data-cat-count="zip">0</span>
+      </button>
+      <button type="button" class="files-tab" data-cat="other" role="tab">
+        <span>其他</span><span class="files-tab-count" data-cat-count="other">0</span>
+      </button>
+    </div>
+
     <ul class="file-list" id="fileList"></ul>
   </section>
 

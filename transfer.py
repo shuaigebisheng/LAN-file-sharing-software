@@ -6,6 +6,7 @@
 - 同一 IP 视为同一设备（同设备开多窗口共享身份）
 - 断点续传 + 每个文件可暂停/继续
 - 共享目录可动态切换
+- 支持多选打包下载（zip）
 依赖：
     qr.py
     web/index.html, web/style.css, web/app.js, web/qr.html
@@ -20,6 +21,8 @@ import json
 import time
 import shutil
 import socket
+import tempfile
+import zipfile
 import itertools
 import threading
 import datetime
@@ -634,6 +637,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/upload/status":
             self._handle_status(qs)
 
+        elif path.startswith("/thumb/"):
+            name = urllib.parse.unquote(path[len("/thumb/"):])
+            self._serve_thumb(name)
+
         elif path.startswith("/preview/"):
             name = urllib.parse.unquote(path[len("/preview/"):])
             self._serve_file(name, inline=True)
@@ -655,6 +662,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_upload(qs)
         elif parsed.path == "/api/permission":
             self._handle_permission()
+        elif parsed.path == "/api/zip":
+            self._handle_zip()
         else:
             self._send(404, "Not Found")
 
@@ -670,7 +679,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype_map = {
             ".css":  "text/css; charset=utf-8",
             ".js":   "application/javascript; charset=utf-8",
-            ".mjs":  "application/javascript; charset=utf-8",  # ★ 关键
+            ".mjs":  "application/javascript; charset=utf-8",
             ".html": "text/html; charset=utf-8",
             ".svg":  "image/svg+xml; charset=utf-8",
             ".png":  "image/png",
@@ -851,6 +860,55 @@ class Handler(BaseHTTPRequestHandler):
             if tid is not None:
                 _pause_transfer(tid, str(e))
 
+    def _serve_thumb(self, name):
+        """缩略图端点：返回图片原始字节，带强缓存。
+        只用于 <img> 标签，不支持 Range / HEAD 以外的复杂逻辑。
+        """
+        safe = os.path.basename(name)
+        full = os.path.join(SHARED_DIR, safe)
+        if not os.path.isfile(full):
+            self._send(404, "Not Found")
+            return
+
+        me = self._me()
+        meta = _load_meta()
+        if not can_access(safe, me, meta):
+            self._send(403, "Forbidden")
+            return
+
+        size = os.path.getsize(full)
+        ctype = mimetypes.guess_type(safe)[0] or "application/octet-stream"
+        mtime = int(os.path.getmtime(full))
+        etag = f'W/"{mtime}-{size}"'
+
+        # 条件请求：命中缓存直接返回 304
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(size))
+        self.send_header("ETag", etag)
+        # ★ 与 /preview 不同：这里允许浏览器缓存（前端 URL 带 ?v=mtime 保证失效）
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+
+        if self.command == "HEAD":
+            return
+
+        try:
+            with open(full, "rb") as f:
+                while True:
+                    chunk = f.read(CHUNK)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
     # ---------------- /qr ----------------
 
     def _serve_qr_page(self, qs):
@@ -1002,12 +1060,121 @@ class Handler(BaseHTTPRequestHandler):
 
             self._json({"offset": size, "complete": True, "name": final_name})
         else:
-            # ★ 关键修复：部分写入必须返回非 2xx，
+            # ★ 部分写入必须返回非 2xx，
             #   否则前端只会看到 200 就误以为"完成"。
             #   前端 app.js 会依据 complete:false 把这条任务标为"已暂停"，
             #   下次调用 /upload/status 时就能从此 offset 继续。
             _pause_transfer(tid, "部分写入，等待续传")
             self._json({"offset": received, "complete": False, "name": name}, 422)
+
+    # ---------------- 多选打包下载 ----------------
+
+    def _handle_zip(self):
+        """POST /api/zip
+        body JSON: {"names": ["a.jpg", "b.pdf"]}
+        把所有有权限访问的文件打包成 zip 返回。
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._json({"error": "bad length"}, 400)
+            return
+        # 限制请求体大小：防滥用
+        if length <= 0 or length > 1024 * 1024:
+            self._json({"error": "bad length"}, 400)
+            return
+
+        try:
+            body = self.rfile.read(length)
+            data = json.loads(body.decode("utf-8"))
+        except Exception:
+            self._json({"error": "bad json"}, 400)
+            return
+
+        names = data.get("names") if isinstance(data, dict) else None
+        if not isinstance(names, list) or not names:
+            self._json({"error": "no files"}, 400)
+            return
+        # 一次最多 200 个文件，防呆
+        if len(names) > 200:
+            self._json({"error": "too many files (max 200)"}, 400)
+            return
+
+        me = self._me()
+        meta = _load_meta()
+
+        safe_names = []
+        seen = set()
+        for n in names:
+            safe = os.path.basename(str(n).strip())
+            if not safe or safe in seen:
+                continue
+            seen.add(safe)
+            full = os.path.join(SHARED_DIR, safe)
+            if not os.path.isfile(full):
+                continue
+            if not can_access(safe, me, meta):
+                continue
+            safe_names.append(safe)
+
+        if not safe_names:
+            self._json({"error": "no accessible files"}, 403)
+            return
+
+        # 写临时 zip
+        fd, tmp_path = tempfile.mkstemp(suffix=".zip", prefix="lanshare-")
+        os.close(fd)
+
+        try:
+            with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for name in safe_names:
+                    full = os.path.join(SHARED_DIR, name)
+                    try:
+                        # 使用文件名作为 arcname，避免带路径
+                        zf.write(full, arcname=name)
+                    except OSError:
+                        # 单个文件读失败不影响其它文件
+                        continue
+
+            size = os.path.getsize(tmp_path)
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            if len(safe_names) == 1:
+                # 单个文件时直接用文件名
+                base = os.path.splitext(safe_names[0])[0]
+                filename = base + ".zip"
+            else:
+                filename = f"lanshare-{ts}.zip"
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition",
+                             "attachment; filename*=UTF-8''" +
+                             urllib.parse.quote(filename))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+
+            if self.command == "HEAD":
+                return
+
+            try:
+                with open(tmp_path, "rb") as f:
+                    while True:
+                        chunk = f.read(CHUNK)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+            push_log(f"📦 打包下载 {len(safe_names)} 个文件 "
+                     f"({fmt_bytes(size)}) - {self._me_name()}")
+
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
     # ---------------- 修改权限（只有发送者能改） ----------------
 
