@@ -7,6 +7,8 @@
 - 断点续传 + 每个文件可暂停/继续
 - 共享目录可动态切换
 - 支持多选打包下载（zip）
+- 客户端 token 隔离 part 分片，避免跨客户端覆盖
+- 无主文件视为服务端所有，默认公开，只有服务端能改权限
 依赖：
     qr.py
     web/index.html, web/style.css, web/app.js, web/qr.html
@@ -16,6 +18,7 @@
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -61,7 +64,8 @@ BASE_DIR    = _get_base_dir()
 BUNDLE_DIR  = _get_bundle_dir()
 WEB_DIR     = os.path.join(BASE_DIR, "web")
 SHARED_DIR  = os.path.join(BASE_DIR, "shared")
-PARTIAL_DIR = os.path.join(SHARED_DIR, ".partial")
+DATA_DIR    = os.path.join(BASE_DIR, ".data")          # 内部数据，不对外
+PARTIAL_DIR = os.path.join(DATA_DIR, "partial")        # 固定在 .data 下
 PORT  = 8000
 CHUNK = 64 * 1024
 
@@ -86,14 +90,18 @@ def read_web_file(name):
 
 
 def set_shared_dir(new_dir):
-    global SHARED_DIR, PARTIAL_DIR
+    """
+    切换共享目录。
+
+    PARTIAL_DIR 不跟着切换，仍然固定在 DATA_DIR/partial。
+    这样切换目录不会影响正在进行的上传任务（part 文件位置不变）。
+    """
+    global SHARED_DIR
     new_dir = os.path.abspath(new_dir)
     if new_dir == SHARED_DIR:
         return True, None
-    new_partial = os.path.join(new_dir, ".partial")
     try:
         os.makedirs(new_dir, exist_ok=True)
-        os.makedirs(new_partial, exist_ok=True)
         probe = os.path.join(new_dir, ".write_probe")
         with open(probe, "w") as f:
             f.write("ok")
@@ -101,8 +109,61 @@ def set_shared_dir(new_dir):
     except OSError as e:
         return False, str(e)
     SHARED_DIR = new_dir
-    PARTIAL_DIR = new_partial
     return True, None
+
+
+def _migrate_legacy_data():
+    """
+    把旧版本遗留在 shared/ 下的内部文件搬到 .data/。
+    """
+    old_meta = os.path.join(SHARED_DIR, ".meta.json")
+    new_meta = os.path.join(DATA_DIR, "meta.json")
+    try:
+        if os.path.isfile(old_meta) and not os.path.exists(new_meta):
+            os.makedirs(DATA_DIR, exist_ok=True)
+            shutil.move(old_meta, new_meta)
+    except OSError:
+        pass
+
+    old_partial = os.path.join(SHARED_DIR, ".partial")
+    if os.path.isdir(old_partial):
+        try:
+            os.makedirs(PARTIAL_DIR, exist_ok=True)
+            for fn in os.listdir(old_partial):
+                src = os.path.join(old_partial, fn)
+                dst = os.path.join(PARTIAL_DIR, fn)
+                if os.path.isfile(src) and not os.path.exists(dst):
+                    shutil.move(src, dst)
+            try:
+                shutil.rmtree(old_partial)
+            except OSError:
+                pass
+        except OSError:
+            pass
+
+
+# =====================================================================
+#  客户端 ID（用于 part 文件隔离）
+# =====================================================================
+
+_CID_SAFE_RE = re.compile(r"[^a-zA-Z0-9._-]")
+
+
+def _normalize_cid(raw):
+    """把前端传来的 cid 清洗成安全短字符串。"""
+    if not raw:
+        return ""
+    s = _CID_SAFE_RE.sub("_", str(raw).strip())
+    return s[:80]
+
+
+def _part_path(name, size, cid=""):
+    """
+    part 分片路径：{PARTIAL_DIR}/{cid}.{name}.{size}.part
+    """
+    safe = os.path.basename(name)
+    prefix = (cid + ".") if cid else ""
+    return os.path.join(PARTIAL_DIR, f"{prefix}{safe}.{size}.part")
 
 
 # =====================================================================
@@ -186,7 +247,6 @@ _LOCAL_IPS_LOCK = threading.Lock()
 
 
 def _local_ips():
-    """本机的局域网 IP 集合（带缓存，30 秒刷新一次）。"""
     with _LOCAL_IPS_LOCK:
         now = time.time()
         if now - _LOCAL_IPS_CACHE["t"] > 30 or not _LOCAL_IPS_CACHE["ips"]:
@@ -199,10 +259,6 @@ def _local_ips():
 
 
 def client_key(ip):
-    """
-    把本机地址（127.0.0.1 / ::1 / localhost / 本机的局域网 IP）
-    统一成一个键。其他 IP 原样返回。
-    """
     if not ip:
         return ""
     if ip in ("127.0.0.1", "::1", "localhost"):
@@ -219,9 +275,9 @@ def client_key(ip):
 #  在线设备
 # =====================================================================
 
-CLIENTS = {}                      # key -> {"ip": ..., "name": ..., "t": ...}
+CLIENTS = {}
 CLIENTS_LOCK = threading.Lock()
-CLIENT_TIMEOUT = 120              # 2 分钟，避免手机切后台就掉线
+CLIENT_TIMEOUT = 120
 
 
 def touch_client(key, ip, name=None):
@@ -247,12 +303,6 @@ def get_client_name(key):
 
 
 def get_active_clients():
-    """
-    按 IP（CLIENTS 的 key）天然去重。
-
-    同名但 IP 不同的设备视为两台，都保留 —— 前端显示 "name · ip"，
-    用户可据此区分。
-    """
     now = time.time()
     with CLIENTS_LOCK:
         for k in list(CLIENTS.keys()):
@@ -265,12 +315,9 @@ def get_active_clients():
             for k in CLIENTS
             if now - CLIENTS[k]["t"] < CLIENT_TIMEOUT
         ]
-    
+
+
 def _reset_clients_for_new_network():
-    """
-    网络切换时清掉所有非本机客户端。
-    返回清掉的数量，便于日志。
-    """
     with CLIENTS_LOCK:
         removed = 0
         for k in list(CLIENTS.keys()):
@@ -279,15 +326,16 @@ def _reset_clients_for_new_network():
                 removed += 1
         return removed
 
+
 # =====================================================================
-#  文件元数据（权限）
+#  文件元数据（权限 + 完成标记）
 # =====================================================================
 
 META_LOCK = threading.Lock()
 
 
 def _meta_path():
-    return os.path.join(SHARED_DIR, ".meta.json")
+    return os.path.join(DATA_DIR, "meta.json")
 
 
 def _load_meta():
@@ -303,7 +351,7 @@ def _load_meta():
 
 def _save_meta(m):
     try:
-        os.makedirs(SHARED_DIR, exist_ok=True)
+        os.makedirs(DATA_DIR, exist_ok=True)
         tmp = _meta_path() + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(m, f, ensure_ascii=False, indent=2)
@@ -313,7 +361,6 @@ def _save_meta(m):
 
 
 def _get_to_clients(info):
-    """从 meta 记录提取接收者列表，兼容新旧格式。"""
     if "to_clients" in info:
         v = info.get("to_clients") or []
         if not isinstance(v, list):
@@ -335,27 +382,33 @@ def _get_to_names(info):
     return [old] if old else []
 
 
-def set_file_meta(name, from_key, to_keys, from_name, to_names):
-    """to_keys 是接收者列表（IP）；空列表表示公开。"""
+def set_file_meta(name, from_key, to_keys, from_name, to_names, cid=None):
+    """
+    写入 / 更新文件元数据。
+
+    cid：
+      - None（默认）→ 保留旧记录里的 cid 字段（用于权限修改场景）
+      - 非 None      → 覆盖为新值（用于上传完成场景）
+    """
     with META_LOCK:
         m = _load_meta()
-        m[name] = {
+        old = m.get(name, {})
+        rec = {
             "from_client": from_key or "",
             "from_name":   from_name or "",
             "to_clients":  list(to_keys or []),
             "to_names":    list(to_names or []),
             "uploaded_at": time.time(),
         }
+        if cid is not None:
+            rec["cid"] = cid
+        elif old.get("cid"):
+            rec["cid"] = old["cid"]
+        m[name] = rec
         _save_meta(m)
 
 
 def can_access(name, me_key, meta):
-    """
-    me_key 已经归一化（client_key 的返回值）。
-    - 无元数据：公开（旧文件兼容）
-    - to_clients 为空：公开
-    - to_clients 非空：发送者 / 其中任一接收者可见
-    """
     info = meta.get(name)
     if info is None:
         return True
@@ -371,16 +424,31 @@ def can_access(name, me_key, meta):
     return False
 
 
+def _is_file_mine(info, me_key):
+    """
+    判断当前访问者是不是文件"主人"。
+
+    - 有 from_client：是则 True
+    - 无 from_client（无主文件，视为服务端所有）：只有本机返回 True
+    """
+    from_key = client_key(info.get("from_client", "")) if info else ""
+    if from_key:
+        return from_key == me_key
+    return me_key == _LOCAL_KEY
+
+
 # =====================================================================
 #  正在传输
 # =====================================================================
 
 TRANSFERS = {}
 TRANSFERS_LOCK = threading.Lock()
+_FINALIZE_LOCK = threading.Lock()      # 保护 part → shared 的移动
 _TID = itertools.count(1)
 
 
-def _new_transfer(direction, name, size, offset, client):
+def _new_transfer(direction, name, size, offset, client,
+                  client_key_val="", cid=""):
     now = time.time()
     with TRANSFERS_LOCK:
         if direction == "up":
@@ -388,6 +456,7 @@ def _new_transfer(direction, name, size, offset, client):
                 if (old["dir"] == "up"
                         and old["name"] == name
                         and old["size"] == size
+                        and old.get("cid", "") == cid
                         and not (old["done"] and old["ok"])):
                     old["received"] = offset
                     old["t0"] = now
@@ -399,6 +468,8 @@ def _new_transfer(direction, name, size, offset, client):
                     old["paused"] = False
                     old["error"] = None
                     old["client"] = client
+                    old["client_key"] = client_key_val
+                    old["cid"] = cid
                     return old_tid
         tid = next(_TID)
         TRANSFERS[tid] = {
@@ -406,6 +477,8 @@ def _new_transfer(direction, name, size, offset, client):
             "received": offset, "t0": now, "last_t": now, "last_b": offset,
             "speed": 0.0, "done": False, "ok": False,
             "paused": False, "error": None, "client": client,
+            "client_key": client_key_val,
+            "cid": cid,
         }
     return tid
 
@@ -463,6 +536,31 @@ def _gc_transfers(max_age=5.0):
                 del TRANSFERS[tid]
 
 
+def _cancel_transfer(name, size, me_key, cid):
+    """取消某个上传：删 part + 移除 transfer 记录。"""
+    part = _part_path(name, size, cid)
+    with TRANSFERS_LOCK:
+        for tid, t in list(TRANSFERS.items()):
+            if (t["dir"] == "up"
+                    and t["name"] == name
+                    and t["size"] == size
+                    and t.get("cid", "") == cid
+                    and not (t["done"] and t["ok"])):
+                ck = t.get("client_key") or ""
+                if ck and ck != me_key:
+                    return False
+                del TRANSFERS[tid]
+                break
+
+    try:
+        if os.path.isfile(part):
+            os.remove(part)
+    except OSError:
+        pass
+
+    return True
+
+
 # =====================================================================
 #  工具
 # =====================================================================
@@ -486,13 +584,8 @@ def fmt_speed(bps):
 #  HTTP
 # =====================================================================
 
-def _part_path(name, size):
-    safe = os.path.basename(name)
-    return os.path.join(PARTIAL_DIR, f"{safe}.{size}.part")
-
-
 class Handler(BaseHTTPRequestHandler):
-    server_version = "FileDrop/2.1"
+    server_version = "FileDrop/2.5"
     protocol_version = "HTTP/1.1"
     timeout = 60
 
@@ -503,6 +596,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _me_name(self):
         return get_client_name(self._me()) or self.client_address[0]
+
+    def _resolve_cid(self, qs=None, data=None):
+        raw = ""
+        if qs:
+            raw = (qs.get("cid") or [""])[0]
+        if not raw and isinstance(data, dict):
+            raw = data.get("cid") or ""
+        cid = _normalize_cid(raw)
+        if cid:
+            return cid
+        return client_key(self.client_address[0])
 
     # ---------- 日志 ----------
 
@@ -542,7 +646,6 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def handle_one_request(self):
-        # TLS / SSLv2 打到 HTTP 端口：直接关闭
         try:
             peek = self.connection.recv(1, socket.MSG_PEEK)
             if peek and peek[0] in (0x16, 0x80):
@@ -552,7 +655,6 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
-        # 每个请求都刷新在线状态
         try:
             ua = self.headers.get("User-Agent", "") if self.headers else ""
             ip = self.client_address[0]
@@ -660,6 +762,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/upload":
             qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             self._handle_upload(qs)
+        elif parsed.path == "/upload/cancel":
+            self._handle_cancel()
         elif parsed.path == "/api/permission":
             self._handle_permission()
         elif parsed.path == "/api/zip":
@@ -708,8 +812,6 @@ class Handler(BaseHTTPRequestHandler):
             names = []
 
         for name in names:
-            if name.startswith("."):
-                continue
             p = os.path.join(SHARED_DIR, name)
             if not os.path.isfile(p):
                 continue
@@ -727,7 +829,7 @@ class Handler(BaseHTTPRequestHandler):
                 "from_name": info.get("from_name", "") or "",
                 "to_clients": to_keys,
                 "to_names": to_nms,
-                "is_mine": client_key(info.get("from_client", "")) == me,
+                "is_mine": _is_file_mine(info, me),
             })
         files.sort(key=lambda x: x["mtime"], reverse=True)
         self._json(files)
@@ -752,7 +854,7 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_file(self, name, inline=False):
         safe = os.path.basename(name)
         full = os.path.join(SHARED_DIR, safe)
-        if not os.path.isfile(full):
+        if not safe or not os.path.isfile(full):
             self._send(404, "File not found")
             return
 
@@ -767,7 +869,6 @@ class Handler(BaseHTTPRequestHandler):
         prefix = "inline" if inline else "attachment"
         disp = prefix + "; filename*=UTF-8''" + urllib.parse.quote(safe)
 
-        # ---- 解析 Range 头（bytes=start-end / bytes=start- / bytes=-suffix） ----
         range_header = (self.headers.get("Range", "") if self.headers else "") or ""
         start, end = 0, size - 1
         is_range = False
@@ -780,26 +881,22 @@ class Handler(BaseHTTPRequestHandler):
                     s_str = s_str.strip()
                     e_str = e_str.strip()
                     if s_str == "" and e_str:
-                        # bytes=-N（最后 N 字节）
                         n = int(e_str)
                         if n > 0:
                             start = max(0, size - n)
                             end = size - 1
                             is_range = True
                     elif s_str and e_str == "":
-                        # bytes=N-（从 N 到文件尾）
                         start = int(s_str)
                         end = size - 1
                         is_range = True
                     elif s_str and e_str:
-                        # bytes=N-M
                         start = int(s_str)
                         end = int(e_str)
                         is_range = True
 
                     if is_range:
                         if start < 0 or end >= size or start > end:
-                            # 无效范围
                             self.send_response(416)
                             self.send_header("Content-Range", f"bytes */{size}")
                             self.send_header("Content-Length", "0")
@@ -811,7 +908,6 @@ class Handler(BaseHTTPRequestHandler):
 
         length = end - start + 1
 
-        # ---- 发送响应头 ----
         if is_range:
             self.send_response(206)
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
@@ -825,16 +921,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
-        # HEAD 请求：只发 headers，不写 body
         if self.command == "HEAD":
             return
 
-        # ---- transfer 记录（预览不产生进度条） ----
         tid = None
         if not inline:
             tid = _new_transfer("down", safe, size, start, self._me_name())
 
-        # ---- 发送 body ----
         sent = 0
         try:
             with open(full, "rb") as f:
@@ -851,7 +944,6 @@ class Handler(BaseHTTPRequestHandler):
                         _update_transfer(tid, start + sent)
 
             if tid is not None:
-                # 完整文件 → 成功；分段 → 也标记成功（只是日志/面板好看些）
                 _finish_transfer(tid, True)
         except (BrokenPipeError, ConnectionResetError):
             if tid is not None:
@@ -861,12 +953,9 @@ class Handler(BaseHTTPRequestHandler):
                 _pause_transfer(tid, str(e))
 
     def _serve_thumb(self, name):
-        """缩略图端点：返回图片原始字节，带强缓存。
-        只用于 <img> 标签，不支持 Range / HEAD 以外的复杂逻辑。
-        """
         safe = os.path.basename(name)
         full = os.path.join(SHARED_DIR, safe)
-        if not os.path.isfile(full):
+        if not safe or not os.path.isfile(full):
             self._send(404, "Not Found")
             return
 
@@ -881,7 +970,6 @@ class Handler(BaseHTTPRequestHandler):
         mtime = int(os.path.getmtime(full))
         etag = f'W/"{mtime}-{size}"'
 
-        # 条件请求：命中缓存直接返回 304
         if self.headers.get("If-None-Match") == etag:
             self.send_response(304)
             self.send_header("ETag", etag)
@@ -893,7 +981,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(size))
         self.send_header("ETag", etag)
-        # ★ 与 /preview 不同：这里允许浏览器缓存（前端 URL 带 ?v=mtime 保证失效）
         self.send_header("Cache-Control", "public, max-age=86400")
         self.end_headers()
 
@@ -909,6 +996,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(chunk)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
     # ---------------- /qr ----------------
 
     def _serve_qr_page(self, qs):
@@ -942,12 +1030,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "bad params"}, 400)
             return
 
+        cid = self._resolve_cid(qs=qs)
+        part = _part_path(name, size, cid)
+
+        meta = _load_meta()
+        info = meta.get(name, {})
         final = os.path.join(SHARED_DIR, name)
-        if os.path.isfile(final) and os.path.getsize(final) == size:
+
+        # 只有"最终文件确实由当前 cid 传成功"才算 complete。
+        if (os.path.isfile(final)
+                and os.path.getsize(final) == size
+                and info.get("cid") == cid):
+            try:
+                if os.path.isfile(part):
+                    os.remove(part)
+                    push_log(f"🧹 清理残留分片 {os.path.basename(part)}")
+            except OSError:
+                pass
             self._json({"offset": size, "complete": True, "name": name})
             return
 
-        part = _part_path(name, size)
         if os.path.isfile(part):
             offset = os.path.getsize(part)
             if offset >= size:
@@ -980,13 +1082,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, "Bad Content-Length")
             return
 
-        # 目标接收者：逗号分隔的 IP 列表，空 = 公开
         to_raw = (qs.get("to") or [""])[0].strip()
         to_clients = [x.strip() for x in to_raw.split(",") if x.strip()]
         from_client = self._me()
+        cid = self._resolve_cid(qs=qs)
 
         os.makedirs(PARTIAL_DIR, exist_ok=True)
-        part = _part_path(name, size)
+        part = _part_path(name, size, cid)
 
         try:
             if os.path.exists(part):
@@ -1005,7 +1107,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         who = self._me_name()
-        tid = _new_transfer("up", name, size, offset, who)
+        tid = _new_transfer("up", name, size, offset, who, from_client, cid)
 
         received = offset
         try:
@@ -1032,23 +1134,25 @@ class Handler(BaseHTTPRequestHandler):
 
         if received >= size:
             base, ext = os.path.splitext(name)
-            target = os.path.join(SHARED_DIR, name)
-            n = 1
-            while os.path.exists(target):
-                target = os.path.join(SHARED_DIR, f"{base}({n}){ext}")
-                n += 1
-            try:
-                shutil.move(part, target)
-            except OSError as e:
-                _pause_transfer(tid, str(e))
-                self._send(500, f"finalize failed: {e}")
-                return
+            # 用锁保证选名 + 移动是原子的，避免两个线程选到同一个 target
+            with _FINALIZE_LOCK:
+                target = os.path.join(SHARED_DIR, name)
+                n = 1
+                while os.path.exists(target):
+                    target = os.path.join(SHARED_DIR, f"{base}({n}){ext}")
+                    n += 1
+                try:
+                    shutil.move(part, target)
+                except OSError as e:
+                    _pause_transfer(tid, str(e))
+                    self._send(500, f"finalize failed: {e}")
+                    return
 
             final_name = os.path.basename(target)
             from_name = get_client_name(from_client) or from_client
             to_names = [get_client_name(t) or t for t in to_clients]
             set_file_meta(final_name, from_client, to_clients,
-                          from_name, to_names)
+                          from_name, to_names, cid)
 
             _finish_transfer(tid, True)
             if to_clients:
@@ -1060,26 +1164,56 @@ class Handler(BaseHTTPRequestHandler):
 
             self._json({"offset": size, "complete": True, "name": final_name})
         else:
-            # ★ 部分写入必须返回非 2xx，
-            #   否则前端只会看到 200 就误以为"完成"。
-            #   前端 app.js 会依据 complete:false 把这条任务标为"已暂停"，
-            #   下次调用 /upload/status 时就能从此 offset 继续。
             _pause_transfer(tid, "部分写入，等待续传")
             self._json({"offset": received, "complete": False, "name": name}, 422)
 
-    # ---------------- 多选打包下载 ----------------
+    # ---------------- 取消上传 ----------------
 
-    def _handle_zip(self):
-        """POST /api/zip
-        body JSON: {"names": ["a.jpg", "b.pdf"]}
-        把所有有权限访问的文件打包成 zip 返回。
-        """
+    def _handle_cancel(self):
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             self._json({"error": "bad length"}, 400)
             return
-        # 限制请求体大小：防滥用
+        if length <= 0 or length > 65536:
+            self._json({"error": "bad length"}, 400)
+            return
+
+        try:
+            body = self.rfile.read(length)
+            data = json.loads(body.decode("utf-8"))
+        except Exception:
+            self._json({"error": "bad json"}, 400)
+            return
+
+        name = os.path.basename((data.get("name") or "").strip())
+        try:
+            size = int(data.get("size") or 0)
+        except (ValueError, TypeError):
+            size = 0
+
+        if not name or size <= 0:
+            self._json({"error": "bad params"}, 400)
+            return
+
+        cid = self._resolve_cid(data=data)
+        me = self._me()
+        ok = _cancel_transfer(name, size, me, cid)
+        if not ok:
+            self._json({"error": "not owner"}, 403)
+            return
+
+        push_log(f"✗ {self._me_name()} 取消上传 {name}")
+        self._json({"ok": True, "name": name, "size": size})
+
+    # ---------------- 多选打包下载 ----------------
+
+    def _handle_zip(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._json({"error": "bad length"}, 400)
+            return
         if length <= 0 or length > 1024 * 1024:
             self._json({"error": "bad length"}, 400)
             return
@@ -1095,7 +1229,6 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(names, list) or not names:
             self._json({"error": "no files"}, 400)
             return
-        # 一次最多 200 个文件，防呆
         if len(names) > 200:
             self._json({"error": "too many files (max 200)"}, 400)
             return
@@ -1121,7 +1254,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "no accessible files"}, 403)
             return
 
-        # 写临时 zip
         fd, tmp_path = tempfile.mkstemp(suffix=".zip", prefix="lanshare-")
         os.close(fd)
 
@@ -1130,16 +1262,13 @@ class Handler(BaseHTTPRequestHandler):
                 for name in safe_names:
                     full = os.path.join(SHARED_DIR, name)
                     try:
-                        # 使用文件名作为 arcname，避免带路径
                         zf.write(full, arcname=name)
                     except OSError:
-                        # 单个文件读失败不影响其它文件
                         continue
 
             size = os.path.getsize(tmp_path)
             ts = time.strftime("%Y%m%d-%H%M%S")
             if len(safe_names) == 1:
-                # 单个文件时直接用文件名
                 base = os.path.splitext(safe_names[0])[0]
                 filename = base + ".zip"
             else:
@@ -1176,7 +1305,7 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
-    # ---------------- 修改权限（只有发送者能改） ----------------
+    # ---------------- 修改权限（只有发送者 / 服务端能改） ----------------
 
     def _handle_permission(self):
         try:
@@ -1200,10 +1329,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "missing name"}, 400)
             return
 
-        # 接收者列表（空数组 = 公开）
         to_clients = data.get("to_clients")
         if to_clients is None:
-            # 兼容旧的单值格式
             old = (data.get("to") or "").strip()
             to_clients = [old] if old else []
         if not isinstance(to_clients, list):
@@ -1219,13 +1346,22 @@ class Handler(BaseHTTPRequestHandler):
         meta = _load_meta()
         info = meta.get(name, {})
         from_key = client_key(info.get("from_client", ""))
-        if from_key and from_key != me:
+
+        if not from_key:
+            # 无主文件：视为服务端所有，只有本机可以改权限
+            if me != _LOCAL_KEY:
+                self._json(
+                    {"error": "该文件由服务端管理，只有服务端可以修改权限"},
+                    403)
+                return
+        elif from_key != me:
             self._json({"error": "只有发送者可以修改权限"}, 403)
             return
 
         from_name = get_client_name(me) or me
         to_names = [get_client_name(t) or t for t in to_clients]
 
+        # 不传 cid，保留原有的 cid 字段
         set_file_meta(name, me, to_clients, from_name, to_names)
 
         if to_clients:
@@ -1237,6 +1373,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True, "name": name,
                     "to_clients": to_clients,
                     "to_names": to_names})
+
 
 # =====================================================================
 #  IP 探测
@@ -1400,7 +1537,9 @@ class App:
 
     def _start_server(self):
         os.makedirs(SHARED_DIR, exist_ok=True)
+        os.makedirs(DATA_DIR, exist_ok=True)
         os.makedirs(PARTIAL_DIR, exist_ok=True)
+        _migrate_legacy_data()
 
         httpd, port = None, PORT
         for p in range(PORT, PORT + 20):
@@ -1425,22 +1564,16 @@ class App:
             pass
 
     def _ip_watcher(self):
-        # self._last_known_ips：上一次观察到的"非空 IP 集合"。
-        # 只在 cur 非空时更新，用于跨过瞬时丢网期，正确识别"换了网络"。
         if not hasattr(self, "_last_known_ips"):
             self._last_known_ips = None
 
         while not self.stop_event.is_set():
             try:
-                cur = get_lan_ips()          # list[str]
+                cur = get_lan_ips()
             except Exception:
                 cur = []
             cur_set = set(cur)
 
-            # ---- 1) 判断是否换了网络 ----
-            # 条件：cur 非空、上一次有已知 IP、且两者完全无交集。
-            # 满足说明从 A 网切到 B 网（中间可能经历过"无 IP"的瞬间，
-            # 但因为我们只在 cur 非空时更新 _last_known_ips，仍能识别）。
             if cur_set and self._last_known_ips and \
                     not (set(self._last_known_ips) & cur_set):
                 n = _reset_clients_for_new_network()
@@ -1451,7 +1584,6 @@ class App:
             if cur_set:
                 self._last_known_ips = list(cur_set)
 
-            # ---- 2) 原有的 UI 刷新逻辑 ----
             if cur != self.last_ips:
                 self.last_ips = list(cur)
                 if cur:

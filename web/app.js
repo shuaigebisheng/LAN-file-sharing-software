@@ -6,6 +6,30 @@ const PDFJS_WORKER_URL = '/static/pdf.worker.min.mjs';
 const PDFJS_MODULE_URL = '/static/pdf.min.mjs';
 
 /* =========================================================
+   客户端 ID（用于 part 文件隔离）
+   ========================================================= */
+
+const CLIENT_ID_KEY = 'landrop_client_id';
+
+function getClientId(){
+  let id = null;
+  try{ id = localStorage.getItem(CLIENT_ID_KEY); }catch(e){}
+  if(!id){
+    if(window.crypto && typeof crypto.randomUUID === 'function'){
+      id = crypto.randomUUID();
+    } else {
+      id = Date.now().toString(36) + '-' +
+           Math.random().toString(36).slice(2, 10) + '-' +
+           Math.random().toString(36).slice(2, 10);
+    }
+    try{ localStorage.setItem(CLIENT_ID_KEY, id); }catch(e){}
+  }
+  return id;
+}
+
+const CLIENT_ID = getClientId();
+
+/* =========================================================
    工具函数
    ========================================================= */
 
@@ -791,7 +815,9 @@ async function startNextIfIdle(){
 
 async function queryOffset(name, size){
   const r = await fetch(
-    '/upload/status?name=' + encodeURIComponent(name) + '&size=' + size,
+    '/upload/status?name=' + encodeURIComponent(name)
+    + '&size=' + size
+    + '&cid=' + encodeURIComponent(CLIENT_ID),
     {cache: 'no-store'});
   if(!r.ok) return {offset: 0, complete: false};
   return await r.json();
@@ -808,7 +834,9 @@ function uploadSlice(item){
     item.xhr = xhr;
 
     let url = '/upload?name=' + encodeURIComponent(file.name)
-            + '&size=' + file.size + '&offset=' + startOffset;
+            + '&size=' + file.size
+            + '&offset=' + startOffset
+            + '&cid=' + encodeURIComponent(CLIENT_ID);
     if(item.target) url += '&to=' + encodeURIComponent(item.target);
 
     xhr.open('POST', url);
@@ -937,11 +965,28 @@ function clearDone(){
   renderQueue();
 }
 
+/* 通知服务端取消上传，删除分片 + 移除服务端传输记录 */
+function notifyServerCancel(item){
+  if(!item || item.status === 'done') return;
+  const name = item.fileName;
+  const size = item.fileSize;
+  if(!name || !size) return;
+  try{
+    fetch('/upload/cancel', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name, size, cid: CLIENT_ID }),
+      keepalive: true,
+    }).catch(() => {});
+  }catch(e){}
+}
+
 function removeItem(id){
   const idx = queue.findIndex(q => q.id === id);
   if(idx < 0) return;
   const item = queue[idx];
   if(item.xhr){ try{ item.xhr.abort(); }catch(e){} }
+  notifyServerCancel(item);
   deleteBlobFromDB(item.fileName, item.fileSize).catch(() => {});
   queue.splice(idx, 1);
   renderQueue();
@@ -952,6 +997,7 @@ function clearAll(){
   if(!queue.length) return;
   for(const item of queue){
     if(item.xhr){ try{ item.xhr.abort(); }catch(e){} }
+    notifyServerCancel(item);
     deleteBlobFromDB(item.fileName, item.fileSize).catch(() => {});
   }
   queue = [];
@@ -1243,7 +1289,7 @@ function toggleFileSelection(name){
     const now = selectedFiles.has(name);
     item.classList.toggle('selected', now);
 
-    // ★ 同步更新复选框内的对勾 SVG，避免等到下次轮询才出现
+    // 同步更新复选框内的对勾 SVG，避免等到下次轮询才出现
     const chk = item.querySelector('.file-check');
     if(chk){
       chk.innerHTML = now
@@ -1337,7 +1383,7 @@ async function refreshFiles(){
     const res = await fetch('/api/files', {cache: 'no-store'});
     const list = await res.json();
 
-    // ★ 指纹：内容完全相同时跳过重绘，避免 iPad 上缩略图闪烁
+    // 指纹：内容完全相同时跳过重绘，避免 iPad 上缩略图闪烁
     const key = list.map(f =>
       f.name + '\x00' + f.mtime + '\x00' + f.size + '\x00' +
       (f.to_clients || []).join(',') + '\x00' + (f.is_mine ? '1' : '0')
