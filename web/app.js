@@ -207,6 +207,7 @@ let queue = [];
 let uid = 0;
 let clients = [];
 let files = [];
+let _fileElCache = new Map();     // name -> <li> 元素，用于 DOM 复用
 
 const TARGET_KEY = 'landrop_target';
 const TARGET_NAME_KEY = 'landrop_target_name';
@@ -275,8 +276,8 @@ const CATEGORY_EXT_MAP = {
 };
 
 const FILE_SORTERS = {
-  mtime_desc: (a, b) => b.mtime - a.mtime,
-  mtime_asc:  (a, b) => a.mtime - b.mtime,
+  mtime_desc: (a, b) => (b.added_at || b.mtime) - (a.added_at || a.mtime),
+  mtime_asc:  (a, b) => (a.added_at || a.mtime) - (b.added_at || b.mtime),
   size_desc:  (a, b) => b.size - a.size,
   size_asc:   (a, b) => a.size - b.size,
   name_asc:   (a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN', { numeric: true }),
@@ -965,7 +966,6 @@ function clearDone(){
   renderQueue();
 }
 
-/* 通知服务端取消上传，删除分片 + 移除服务端传输记录 */
 function notifyServerCancel(item){
   if(!item || item.status === 'done') return;
   const name = item.fileName;
@@ -1083,16 +1083,31 @@ function pruneSelected(){
   }
 }
 
+/* 渲染指纹：内容一致则复用已有 DOM，不重建 */
+function fileRenderKey(f){
+  return f.mtime + '|' + f.size + '|' + (f.added_at || 0) + '|' +
+         (f.from_name || '') + '|' +
+         (f.to_clients || []).join(',') + '|' +
+         (f.to_names || []).join(',') + '|' +
+         (f.is_mine ? '1' : '0');
+}
+
 function renderFiles(){
   fileCount.textContent = files.length;
   updateFileTabCounts();
-
   pruneSelected();
 
   const list = getFilteredSortedFiles();
 
+  // ---- 空态 ----
   if(!list.length){
+    // 把已渲染的节点从 DOM 移除，但缓存保留（切回来时还能复用）
+    for(const el of _fileElCache.values()){
+      if(el.parentNode) el.parentNode.removeChild(el);
+    }
+    fileList.innerHTML = '';
     if(!files.length){
+      _fileElCache.clear();
       fileList.innerHTML =
         '<li class="empty">' +
         '<div class="empty-icon">' +
@@ -1107,15 +1122,61 @@ function renderFiles(){
       li.textContent = fileFilter.search
         ? '没有匹配的文件'
         : '该分类下暂无文件';
-      fileList.innerHTML = '';
       fileList.appendChild(li);
     }
-  } else {
-    fileList.innerHTML = '';
-    for(const f of list) fileList.appendChild(buildFileEl(f));
+    updateFileSelectInfo(list);
+    return;
   }
 
-  updateFileSelectInfo();
+  // ---- 主分支：DOM diff ----
+  // 如果之前是空态，先把它清掉
+  const emptyEl = fileList.querySelector('.empty, .files-no-result');
+  if(emptyEl) emptyEl.remove();
+
+  const modeKey = fileSelectMode ? '1' : '0';
+  const newCache = new Map();
+
+  // 第一步：为新列表准备节点（复用或新建）
+  for(const f of list){
+    const rk = fileRenderKey(f);
+    let el = _fileElCache.get(f.name);
+
+    if(el && el._renderKey === rk && el._modeKey === modeKey){
+      // 完全一致，直接复用
+    } else {
+      const newEl = buildFileEl(f);
+      newEl._renderKey = rk;
+      newEl._modeKey = modeKey;
+      if(el && el.parentNode){
+        el.parentNode.replaceChild(newEl, el);
+      }
+      el = newEl;
+    }
+    newCache.set(f.name, el);
+  }
+
+  // 第二步：按新列表顺序调整 DOM
+  let prev = null;
+  for(const f of list){
+    const el = newCache.get(f.name);
+    const expectedNext = prev ? prev.nextSibling : fileList.firstChild;
+    if(el !== expectedNext){
+      fileList.insertBefore(el, expectedNext);
+    }
+    prev = el;
+  }
+
+  // 第三步：移除不在列表中的节点
+  const keep = new Set(list.map(f => f.name));
+  for(const [name, el] of _fileElCache){
+    if(!keep.has(name)){
+      if(el.parentNode) el.parentNode.removeChild(el);
+    }
+  }
+
+  _fileElCache = newCache;
+
+  updateFileSelectInfo(list);
 }
 
 /* ---- 搜索框 ---- */
@@ -1247,15 +1308,13 @@ function saveFileFilter(){
    多选模式
    ========================================================= */
 
-function updateFileSelectInfo(){
+function updateFileSelectInfo(list){
+  if(!list) list = getFilteredSortedFiles();
   const n = selectedFiles.size;
   fileSelectedInfo.textContent = '已选 ' + n + ' 项';
 
-  // "打包下载"按钮状态
   fileZipBtn.disabled = (n === 0);
 
-  // "全选"按钮文字
-  const list = getFilteredSortedFiles();
   const allSelected = list.length > 0 &&
                       list.every(f => selectedFiles.has(f.name));
   fileSelectAllBtn.textContent = allSelected ? '取消全选' : '全选';
@@ -1289,7 +1348,6 @@ function toggleFileSelection(name){
     const now = selectedFiles.has(name);
     item.classList.toggle('selected', now);
 
-    // 同步更新复选框内的对勾 SVG，避免等到下次轮询才出现
     const chk = item.querySelector('.file-check');
     if(chk){
       chk.innerHTML = now
@@ -1380,17 +1438,20 @@ let _lastFilesKey = null;
 
 async function refreshFiles(){
   try{
-    const res = await fetch('/api/files', {cache: 'no-store'});
+    // 服务端启用 ETag：无变化时返回 304，浏览器会用缓存合成 200，
+    // 内容与上次一致，交给指纹判断即可跳过重绘
+    const res = await fetch('/api/files', {cache: 'no-cache'});
+    if(!res.ok) return;
     const list = await res.json();
 
-    // 指纹：内容完全相同时跳过重绘，避免 iPad 上缩略图闪烁
     const key = list.map(f =>
       f.name + '\x00' + f.mtime + '\x00' + f.size + '\x00' +
+      (f.added_at || 0) + '\x00' +
       (f.to_clients || []).join(',') + '\x00' + (f.is_mine ? '1' : '0')
     ).join('\x01');
 
     if(key === _lastFilesKey){
-      return;                // 无变化，不动 DOM
+      return;
     }
     _lastFilesKey = key;
 
@@ -1479,7 +1540,7 @@ function buildFileEl(f){
   sizeSpan.textContent = fmtSize(f.size);
   info.appendChild(sizeSpan);
   info.appendChild(span('sep', '·'));
-  info.appendChild(span(null, fmtTime(f.mtime)));
+  info.appendChild(span(null, fmtTime(f.added_at || f.mtime)));
 
   if(f.from_name){
     info.appendChild(span('sep', '·'));
@@ -1537,7 +1598,6 @@ function buildFileEl(f){
   // 选择模式下：点击整行切换选中
   if(fileSelectMode){
     li.addEventListener('click', e => {
-      // 忽略内部按钮/链接
       if(e.target.closest('button, a')) return;
       toggleFileSelection(f.name);
     });
@@ -1611,7 +1671,7 @@ function openPreview(file){
   titleEl.title = file.name;
   const subEl = document.createElement('div');
   subEl.className = 'preview-sub';
-  subEl.textContent = fmtSize(file.size) + ' · ' + fmtTime(file.mtime);
+  subEl.textContent = fmtSize(file.size) + ' · ' + fmtTime(file.added_at || file.mtime);
   titleBox.append(titleEl, subEl);
 
   const actions = document.createElement('div');

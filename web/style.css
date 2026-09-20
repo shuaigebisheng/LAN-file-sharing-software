@@ -200,10 +200,11 @@ h1{
   color:var(--text);
   font-family:inherit;font-size:13.5px;font-weight:500;
   cursor:pointer;text-align:left;
-  transition:border-color .15s,box-shadow .15s,background .15s;
+  transition:border-color .15s,box-shadow .15s,background .15s,transform .12s ease;
 }
 .target-btn:hover{border-color:var(--border-strong);}
 .target-btn:focus{outline:none;border-color:var(--accent);box-shadow:var(--ring);background:var(--card);}
+.target-btn:active{transform:scale(.985);}
 .target-btn[aria-expanded="true"]{
   border-color:var(--accent);
   background:var(--card);
@@ -215,7 +216,7 @@ h1{
 }
 .target-btn-arrow{
   flex:0 0 auto;color:var(--dim);
-  transition:transform .18s ease;
+  transition:transform .22s cubic-bezier(0.32, 0.72, 0, 1);
 }
 .target-btn[aria-expanded="true"] .target-btn-arrow{transform:rotate(180deg);}
 
@@ -234,11 +235,20 @@ h1{
   max-height:min(60vh, 320px);
   overflow-y:auto;
   -webkit-overflow-scrolling:touch;
-  animation:dropdown-in .14s ease-out;
+  /* 苹果风格：从按钮顶部居中"生长"出来 */
+  transform-origin:top center;
+  will-change:transform,opacity;
+  animation:dropdown-in .25s cubic-bezier(0.32, 0.72, 0, 1);
 }
 @keyframes dropdown-in{
-  from{opacity:0;transform:translateY(-4px);}
-  to{opacity:1;transform:translateY(0);}
+  from{
+    opacity:0;
+    transform:scale(.92) translateY(-8px);
+  }
+  to{
+    opacity:1;
+    transform:scale(1) translateY(0);
+  }
 }
 
 .target-item{
@@ -313,10 +323,10 @@ h1{
   border:1px solid var(--border-2);
   background:var(--card);color:var(--text-2);
   cursor:pointer;font-family:inherit;
-  transition:background .15s,border-color .15s,color .15s;
+  transition:background .15s,border-color .15s,color .15s,transform .12s ease;
 }
 .mini-btn:hover{background:var(--bg);border-color:var(--accent);color:var(--accent);}
-.mini-btn:active{background:var(--accent-soft);}
+.mini-btn:active{background:var(--accent-soft);transform:scale(.97);}
 
 /* 主按钮风格的 mini-btn */
 .mini-btn.primary{
@@ -354,9 +364,10 @@ h1{
   border:1px solid var(--border-2);
   background:var(--card);color:var(--text-2);
   display:grid;place-items:center;cursor:pointer;
-  padding:0;transition:background .15s,border-color .15s,color .15s;
+  padding:0;transition:background .15s,border-color .15s,color .15s,transform .12s ease;
 }
 .qbtn:hover{background:var(--bg);border-color:var(--accent);color:var(--accent);}
+.qbtn:active{transform:scale(.94);}
 .qbtn:disabled{opacity:.35;cursor:default;}
 .qbtn.danger:hover{
   background:var(--danger-soft);
@@ -476,10 +487,11 @@ h1{
   cursor:pointer;
   white-space:nowrap;
   box-sizing:border-box;
-  transition:border-color .15s, box-shadow .15s, background .15s, color .15s;
+  transition:border-color .15s, box-shadow .15s, background .15s, color .15s, transform .12s ease;
 }
 .files-sort-btn:hover{border-color:var(--border-strong);}
 .files-sort-btn:focus{outline:none;border-color:var(--accent);box-shadow:var(--ring);background:var(--card);}
+.files-sort-btn:active{transform:scale(.97);}
 .files-sort-btn[aria-expanded="true"]{
   border-color:var(--accent);
   background:var(--card);
@@ -496,7 +508,7 @@ h1{
 }
 .files-sort-arrow{
   color:var(--dim);
-  transition:transform .18s, color .15s;
+  transition:transform .22s cubic-bezier(0.32, 0.72, 0, 1), color .15s;
   flex:0 0 auto;
 }
 .files-sort-btn[aria-expanded="true"] .files-sort-arrow{
@@ -517,7 +529,10 @@ h1{
   padding:4px;
   margin:0;list-style:none;
   max-height:60vh;overflow-y:auto;
-  animation:dropdown-in .14s ease-out;
+  /* 苹果风格：从按钮右上角"生长"出来 */
+  transform-origin:top right;
+  will-change:transform,opacity;
+  animation:dropdown-in .25s cubic-bezier(0.32, 0.72, 0, 1);
 }
 .files-sort-item{
   display:flex;align-items:center;gap:10px;
@@ -560,10 +575,11 @@ h1{
   color:var(--text-2);
   font-family:inherit;font-size:12.5px;font-weight:500;
   cursor:pointer;
-  transition:background .15s,border-color .15s,color .15s;
+  transition:background .15s,border-color .15s,color .15s,transform .12s ease;
   white-space:nowrap;
 }
 .files-tab:hover{background:var(--bg);border-color:var(--accent);color:var(--accent);}
+.files-tab:active{transform:scale(.96);}
 .files-tab.is-active{
   background:var(--accent);
   border-color:var(--accent);
@@ -622,10 +638,11 @@ h1{
   color:var(--text-2);
   font-family:inherit;font-size:12.5px;font-weight:500;
   cursor:pointer;
-  transition:background .15s,border-color .15s,color .15s;
+  transition:background .15s,border-color .15s,color .15s,transform .12s ease;
   white-space:nowrap;
 }
 .files-select-btn:hover{background:var(--bg);border-color:var(--accent);color:var(--accent);}
+.files-select-btn:active{transform:scale(.96);}
 .files-select-btn svg{flex:0 0 auto;}
 
 .files-selected-info{
@@ -737,9 +754,10 @@ h1{
   background:var(--card);color:var(--text-2);
   display:grid;place-items:center;cursor:pointer;padding:0;
   text-decoration:none;
-  transition:background .15s,border-color .15s,color .15s;
+  transition:background .15s,border-color .15s,color .15s,transform .12s ease;
 }
 .icon-btn:hover{background:var(--bg);border-color:var(--accent);color:var(--accent);}
+.icon-btn:active{transform:scale(.94);}
 .icon-btn.primary{
   background:var(--accent);color:#fff;border-color:var(--accent);
   box-shadow:0 1px 2px rgba(79,107,255,.3);
@@ -816,7 +834,7 @@ h1{
   background:var(--card);border-radius:var(--radius-lg);
   padding:22px;width:100%;max-width:400px;
   box-shadow:var(--shadow-lg);
-  animation:pop .18s cubic-bezier(.2,.9,.3,1.2);
+  animation:pop .28s cubic-bezier(0.32, 0.72, 0, 1);
 }
 @keyframes pop{from{transform:scale(.96);opacity:.5;}to{transform:scale(1);opacity:1;}}
 .modal h3{margin:0 0 4px;font-size:16px;letter-spacing:-.01em;}
@@ -852,9 +870,10 @@ h1{
   padding:8px 16px;border-radius:var(--radius-xs);font-size:13.5px;
   font-weight:600;font-family:inherit;cursor:pointer;
   border:1px solid var(--border-2);background:var(--card);color:var(--text);
-  transition:background .15s,border-color .15s,color .15s;
+  transition:background .15s,border-color .15s,color .15s,transform .12s ease;
 }
 .modal-actions button:hover{border-color:var(--accent);color:var(--accent);}
+.modal-actions button:active{transform:scale(.97);}
 .modal-actions button.primary{
   background:var(--accent);color:#fff;border-color:var(--accent);
 }
@@ -917,7 +936,7 @@ h1{
   min-height:0;
   display:flex;flex-direction:column;
   overflow:hidden;
-  animation:pop .2s cubic-bezier(.2,.9,.3,1.15);
+  animation:pop .28s cubic-bezier(0.32, 0.72, 0, 1);
 }
 .preview-modal.kind-image,
 .preview-modal.kind-video{max-width:min(1200px, 100%);}
@@ -954,11 +973,12 @@ h1{
   background:var(--card);color:var(--text-2);
   font-size:12.5px;font-weight:600;font-family:inherit;
   text-decoration:none;cursor:pointer;
-  transition:background .15s,border-color .15s,color .15s;
+  transition:background .15s,border-color .15s,color .15s,transform .12s ease;
   white-space:nowrap;
 }
 .preview-btn svg{width:14px;height:14px;flex:0 0 auto;}
 .preview-btn:hover{background:var(--bg);border-color:var(--accent);color:var(--accent);}
+.preview-btn:active{transform:scale(.97);}
 .preview-btn.primary{
   background:var(--accent);color:#fff;border-color:var(--accent);
 }

@@ -9,7 +9,13 @@
 - 支持多选打包下载（zip）
 - 客户端 token 隔离 part 分片，避免跨客户端覆盖
 - 无主文件视为服务端所有，默认公开，只有服务端能改权限
-依赖：
+- /api/files 支持 ETag，无变化时返回 304
+- 可选集成 Pillow 生成真缩略图（未安装时优雅降级为原图）
+
+依赖（可选）：
+    Pillow      —— 生成图片缩略图（建议安装）
+    pillow-heif —— 支持 HEIC 缩略图（可选）
+必装：
     qr.py
     web/index.html, web/style.css, web/app.js, web/qr.html
 用法：
@@ -20,10 +26,12 @@
 import os
 import re
 import sys
+import stat
 import json
 import time
 import shutil
 import socket
+import hashlib
 import tempfile
 import zipfile
 import itertools
@@ -40,6 +48,42 @@ import tkinter as tk
 from tkinter import ttk
 
 from qr import qr_encode, qr_svg
+
+
+# =====================================================================
+#  可选依赖：Pillow（用于生成缩略图）
+# =====================================================================
+
+try:
+    from PIL import Image, ImageOps
+    _HAS_PIL = True
+
+    # 防止超大图片引发内存爆炸（约 200M 像素，14142 × 14142）
+    try:
+        Image.MAX_IMAGE_PIXELS = 200 * 1000 * 1000
+    except Exception:
+        pass
+
+    # Pillow 9.1+ 用 Image.Resampling.LANCZOS，旧版用 Image.LANCZOS
+    try:
+        _THUMB_RESAMPLE = Image.Resampling.LANCZOS
+    except AttributeError:
+        _THUMB_RESAMPLE = Image.LANCZOS
+
+    # 尝试注册 HEIC（如果用户装了 pillow-heif）
+    try:
+        import pillow_heif  # type: ignore
+        pillow_heif.register_heif_opener()
+        _HAS_HEIF = True
+    except Exception:
+        _HAS_HEIF = False
+
+except ImportError:
+    Image = None
+    ImageOps = None
+    _HAS_PIL = False
+    _HAS_HEIF = False
+    _THUMB_RESAMPLE = None
 
 
 # =====================================================================
@@ -66,8 +110,13 @@ WEB_DIR     = os.path.join(BASE_DIR, "web")
 SHARED_DIR  = os.path.join(BASE_DIR, "shared")
 DATA_DIR    = os.path.join(BASE_DIR, ".data")          # 内部数据，不对外
 PARTIAL_DIR = os.path.join(DATA_DIR, "partial")        # 固定在 .data 下
+THUMB_DIR   = os.path.join(DATA_DIR, "thumbs")         # ★ 缩略图缓存
 PORT  = 8000
 CHUNK = 64 * 1024
+
+# 缩略图参数
+THUMB_MAX_SIZE = (240, 240)    # 最大边
+THUMB_QUALITY  = 78            # JPEG 质量
 
 
 def read_web_file(name):
@@ -94,7 +143,7 @@ def set_shared_dir(new_dir):
     切换共享目录。
 
     PARTIAL_DIR 不跟着切换，仍然固定在 DATA_DIR/partial。
-    这样切换目录不会影响正在进行的上传任务（part 文件位置不变）。
+    同时清空缩略图缓存（新目录里可能有同名但内容不同的文件）。
     """
     global SHARED_DIR
     new_dir = os.path.abspath(new_dir)
@@ -109,6 +158,14 @@ def set_shared_dir(new_dir):
     except OSError as e:
         return False, str(e)
     SHARED_DIR = new_dir
+
+    # ★ 清空缩略图缓存，避免旧目录的缩略图被误用
+    try:
+        if os.path.isdir(THUMB_DIR):
+            shutil.rmtree(THUMB_DIR, ignore_errors=True)
+    except OSError:
+        pass
+
     return True, None
 
 
@@ -164,6 +221,102 @@ def _part_path(name, size, cid=""):
     safe = os.path.basename(name)
     prefix = (cid + ".") if cid else ""
     return os.path.join(PARTIAL_DIR, f"{prefix}{safe}.{size}.part")
+
+
+# =====================================================================
+#  缩略图
+# =====================================================================
+
+_THUMB_SEM = threading.Semaphore(2)    # 最多 2 个线程同时生成缩略图
+_THUMB_FAILED = set()                  # 已失败过的文件名（避免反复重试）
+_THUMB_FAILED_LOCK = threading.Lock()
+
+
+def _thumb_path(name):
+    """缩略图文件路径。统一用 .jpg 后缀。"""
+    safe = os.path.basename(name)
+    return os.path.join(THUMB_DIR, safe + ".jpg")
+
+
+def _is_image_file(name):
+    ctype = mimetypes.guess_type(name)[0] or ""
+    return ctype.startswith("image/")
+
+
+def _generate_thumbnail_sync(src_path, name):
+    """
+    同步生成缩略图。返回 True / False。
+    失败时把文件名加入 _THUMB_FAILED，避免反复重试。
+    """
+    if not _HAS_PIL:
+        return False
+
+    tmp_path = _thumb_path(name) + ".tmp"
+    dst_path = _thumb_path(name)
+
+    try:
+        os.makedirs(THUMB_DIR, exist_ok=True)
+
+        with Image.open(src_path) as im:
+            # EXIF 方向修正（失败不影响主流程）
+            try:
+                im = ImageOps.exif_transpose(im)
+            except Exception:
+                pass
+
+            # 统一转 RGB（JPEG 不支持透明 / 调色板）
+            if im.mode != "RGB":
+                has_alpha = im.mode in ("RGBA", "LA") or \
+                            (im.mode == "P" and "transparency" in im.info)
+                if has_alpha:
+                    im = im.convert("RGBA")
+                    bg = Image.new("RGB", im.size, (255, 255, 255))
+                    bg.paste(im, mask=im.split()[-1])
+                    im = bg
+                else:
+                    im = im.convert("RGB")
+
+            im.thumbnail(THUMB_MAX_SIZE, _THUMB_RESAMPLE)
+            im.save(tmp_path, "JPEG", quality=THUMB_QUALITY, optimize=True)
+
+        os.replace(tmp_path, dst_path)
+        return True
+
+    except Exception as e:
+        push_log(f"[error] 生成缩略图失败 {name}: {e}")
+        try:
+            if os.path.isfile(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        with _THUMB_FAILED_LOCK:
+            _THUMB_FAILED.add(name)
+        return False
+
+
+def _generate_thumbnail_async(src_path, name):
+    """
+    异步生成缩略图，不阻塞上传响应。
+    并发由 _THUMB_SEM 控制，最多 2 个线程同时跑。
+    """
+    if not _HAS_PIL:
+        return
+    if not _is_image_file(name):
+        return
+
+    with _THUMB_FAILED_LOCK:
+        if name in _THUMB_FAILED:
+            return
+
+    def _job():
+        with _THUMB_SEM:
+            ok = _generate_thumbnail_sync(src_path, name)
+            if ok:
+                push_log(f"🖼 已生成缩略图 {name}")
+
+    t = threading.Thread(target=_job, daemon=True,
+                         name="thumb-" + name[:24])
+    t.start()
 
 
 # =====================================================================
@@ -245,6 +398,10 @@ _LOCAL_KEY = "__local__"
 _LOCAL_IPS_CACHE = {"ips": set(), "t": 0}
 _LOCAL_IPS_LOCK = threading.Lock()
 
+_CLIENT_KEY_CACHE = {"map": {}, "t": 0.0}
+_CLIENT_KEY_CACHE_LOCK = threading.Lock()
+_CLIENT_KEY_CACHE_TTL = 60.0
+
 
 def _local_ips():
     with _LOCAL_IPS_LOCK:
@@ -263,12 +420,32 @@ def client_key(ip):
         return ""
     if ip in ("127.0.0.1", "::1", "localhost"):
         return _LOCAL_KEY
+
+    now = time.time()
+    with _CLIENT_KEY_CACHE_LOCK:
+        if now - _CLIENT_KEY_CACHE["t"] > _CLIENT_KEY_CACHE_TTL:
+            _CLIENT_KEY_CACHE["map"] = {}
+            _CLIENT_KEY_CACHE["t"] = now
+        cached = _CLIENT_KEY_CACHE["map"].get(ip)
+        if cached is not None:
+            return cached
+
+    key = ip
     try:
         if ip in _local_ips():
-            return _LOCAL_KEY
+            key = _LOCAL_KEY
     except Exception:
         pass
-    return ip
+
+    with _CLIENT_KEY_CACHE_LOCK:
+        _CLIENT_KEY_CACHE["map"][ip] = key
+    return key
+
+
+def _invalidate_client_key_cache():
+    with _CLIENT_KEY_CACHE_LOCK:
+        _CLIENT_KEY_CACHE["map"] = {}
+        _CLIENT_KEY_CACHE["t"] = 0.0
 
 
 # =====================================================================
@@ -324,7 +501,8 @@ def _reset_clients_for_new_network():
             if k != _LOCAL_KEY:
                 del CLIENTS[k]
                 removed += 1
-        return removed
+    _invalidate_client_key_cache()
+    return removed
 
 
 # =====================================================================
@@ -332,6 +510,7 @@ def _reset_clients_for_new_network():
 # =====================================================================
 
 META_LOCK = threading.Lock()
+_META_CACHE = {"data": None, "lock": threading.Lock()}
 
 
 def _meta_path():
@@ -339,14 +518,23 @@ def _meta_path():
 
 
 def _load_meta():
+    with _META_CACHE["lock"]:
+        if _META_CACHE["data"] is not None:
+            return _META_CACHE["data"]
+
+    data = {}
     try:
         with open(_meta_path(), "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, dict):
-                return data
+            d = json.load(f)
+            if isinstance(d, dict):
+                data = d
     except (OSError, ValueError):
         pass
-    return {}
+
+    with _META_CACHE["lock"]:
+        if _META_CACHE["data"] is None:
+            _META_CACHE["data"] = data
+        return _META_CACHE["data"]
 
 
 def _save_meta(m):
@@ -356,6 +544,8 @@ def _save_meta(m):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(m, f, ensure_ascii=False, indent=2)
         os.replace(tmp, _meta_path())
+        with _META_CACHE["lock"]:
+            _META_CACHE["data"] = m
     except OSError:
         pass
 
@@ -383,13 +573,6 @@ def _get_to_names(info):
 
 
 def set_file_meta(name, from_key, to_keys, from_name, to_names, cid=None):
-    """
-    写入 / 更新文件元数据。
-
-    cid：
-      - None（默认）→ 保留旧记录里的 cid 字段（用于权限修改场景）
-      - 非 None      → 覆盖为新值（用于上传完成场景）
-    """
     with META_LOCK:
         m = _load_meta()
         old = m.get(name, {})
@@ -404,6 +587,12 @@ def set_file_meta(name, from_key, to_keys, from_name, to_names, cid=None):
             rec["cid"] = cid
         elif old.get("cid"):
             rec["cid"] = old["cid"]
+
+        if old.get("added_at"):
+            rec["added_at"] = old["added_at"]
+        else:
+            rec["added_at"] = time.time()
+
         m[name] = rec
         _save_meta(m)
 
@@ -425,16 +614,42 @@ def can_access(name, me_key, meta):
 
 
 def _is_file_mine(info, me_key):
-    """
-    判断当前访问者是不是文件"主人"。
-
-    - 有 from_client：是则 True
-    - 无 from_client（无主文件，视为服务端所有）：只有本机返回 True
-    """
     from_key = client_key(info.get("from_client", "")) if info else ""
     if from_key:
         return from_key == me_key
     return me_key == _LOCAL_KEY
+
+
+def _compute_files_etag(me_key, file_entries):
+    h = hashlib.md5()
+    h.update(str(me_key).encode("utf-8", "replace"))
+    h.update(b"\x00")
+    for name, st, info in file_entries:
+        h.update(name.encode("utf-8", "replace"))
+        h.update(b"\x00")
+        h.update(str(int(st.st_mtime)).encode())
+        h.update(b"\x00")
+        h.update(str(st.st_size).encode())
+        h.update(b"\x00")
+        h.update(str(info.get("added_at", 0)).encode())
+        h.update(b"\x00")
+        h.update(str(info.get("from_client", "")).encode("utf-8", "replace"))
+        h.update(b"\x00")
+        h.update(str(info.get("from_name", "")).encode("utf-8", "replace"))
+        h.update(b"\x00")
+        to = info.get("to_clients") or []
+        if isinstance(to, list):
+            for x in to:
+                h.update(str(x).encode("utf-8", "replace"))
+                h.update(b",")
+        h.update(b"\x00")
+        tn = info.get("to_names") or []
+        if isinstance(tn, list):
+            for x in tn:
+                h.update(str(x).encode("utf-8", "replace"))
+                h.update(b",")
+        h.update(b"\x01")
+    return h.hexdigest()
 
 
 # =====================================================================
@@ -443,7 +658,7 @@ def _is_file_mine(info, me_key):
 
 TRANSFERS = {}
 TRANSFERS_LOCK = threading.Lock()
-_FINALIZE_LOCK = threading.Lock()      # 保护 part → shared 的移动
+_FINALIZE_LOCK = threading.Lock()
 _TID = itertools.count(1)
 
 
@@ -537,7 +752,6 @@ def _gc_transfers(max_age=5.0):
 
 
 def _cancel_transfer(name, size, me_key, cid):
-    """取消某个上传：删 part + 移除 transfer 记录。"""
     part = _part_path(name, size, cid)
     with TRANSFERS_LOCK:
         for tid, t in list(TRANSFERS.items()):
@@ -585,7 +799,7 @@ def fmt_speed(bps):
 # =====================================================================
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "FileDrop/2.5"
+    server_version = "FileDrop/2.7"
     protocol_version = "HTTP/1.1"
     timeout = 60
 
@@ -804,35 +1018,93 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_files(self):
         me = self._me()
-        meta = _load_meta()
+
+        with META_LOCK:
+            meta = _load_meta()
+            dirty = False
+            file_entries = []
+
+            try:
+                with os.scandir(SHARED_DIR) as it:
+                    dir_entries = list(it)
+            except OSError:
+                dir_entries = []
+
+            for entry in dir_entries:
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                name = entry.name
+                if not can_access(name, me, meta):
+                    continue
+
+                info = meta.get(name)
+                if info is None:
+                    now = time.time()
+                    info = {
+                        "from_client": "",
+                        "from_name":   "",
+                        "to_clients":  [],
+                        "to_names":    [],
+                        "uploaded_at": now,
+                        "added_at":    now,
+                    }
+                    meta[name] = info
+                    dirty = True
+                elif "added_at" not in info:
+                    info["added_at"] = int(st.st_mtime)
+                    dirty = True
+
+                file_entries.append((name, st, info))
+
+            if dirty:
+                _save_meta(meta)
+
+        # ---- ETag ----
+        etag = '"' + _compute_files_etag(me, file_entries) + '"'
+        inm = ""
+        if self.headers:
+            inm = self.headers.get("If-None-Match", "") or ""
+
+        if inm == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         files = []
-        try:
-            names = os.listdir(SHARED_DIR)
-        except OSError:
-            names = []
-
-        for name in names:
-            p = os.path.join(SHARED_DIR, name)
-            if not os.path.isfile(p):
-                continue
-            if not can_access(name, me, meta):
-                continue
-
-            info = meta.get(name, {})
-            st = os.stat(p)
+        for name, st, info in file_entries:
             to_keys = _get_to_clients(info)
             to_nms  = _get_to_names(info)
             files.append({
                 "name": name,
                 "size": st.st_size,
                 "mtime": int(st.st_mtime),
+                "added_at": int(info.get("added_at") or st.st_mtime),
                 "from_name": info.get("from_name", "") or "",
                 "to_clients": to_keys,
                 "to_names": to_nms,
                 "is_mine": _is_file_mine(info, me),
             })
-        files.sort(key=lambda x: x["mtime"], reverse=True)
-        self._json(files)
+        files.sort(key=lambda x: x["added_at"], reverse=True)
+
+        body = json.dumps(files, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("ETag", etag)
+        self.end_headers()
+        if self.command != "HEAD":
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     # ---------------- 在线设备 ----------------
 
@@ -953,9 +1225,20 @@ class Handler(BaseHTTPRequestHandler):
                 _pause_transfer(tid, str(e))
 
     def _serve_thumb(self, name):
+        """
+        缩略图端点。
+
+        优先返回 .data/thumbs/ 下的真缩略图（JPEG，几 KB）；
+        没有则返回原图字节，并在后台触发生成一次缩略图。
+        """
         safe = os.path.basename(name)
-        full = os.path.join(SHARED_DIR, safe)
-        if not safe or not os.path.isfile(full):
+        if not safe:
+            self._send(404, "Not Found")
+            return
+
+        # 原文件必须存在
+        shared_path = os.path.join(SHARED_DIR, safe)
+        if not os.path.isfile(shared_path):
             self._send(404, "Not Found")
             return
 
@@ -965,8 +1248,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send(403, "Forbidden")
             return
 
+        thumb = _thumb_path(safe)
+        if os.path.isfile(thumb):
+            full = thumb
+            ctype = "image/jpeg"
+        else:
+            full = shared_path
+            ctype = mimetypes.guess_type(safe)[0] or "application/octet-stream"
+            # 没有缩略图且是图片 → 后台生成，下次访问就是缩略图
+            if _HAS_PIL and ctype.startswith("image/"):
+                _generate_thumbnail_async(shared_path, safe)
+
         size = os.path.getsize(full)
-        ctype = mimetypes.guess_type(safe)[0] or "application/octet-stream"
         mtime = int(os.path.getmtime(full))
         etag = f'W/"{mtime}-{size}"'
 
@@ -1037,7 +1330,6 @@ class Handler(BaseHTTPRequestHandler):
         info = meta.get(name, {})
         final = os.path.join(SHARED_DIR, name)
 
-        # 只有"最终文件确实由当前 cid 传成功"才算 complete。
         if (os.path.isfile(final)
                 and os.path.getsize(final) == size
                 and info.get("cid") == cid):
@@ -1134,7 +1426,6 @@ class Handler(BaseHTTPRequestHandler):
 
         if received >= size:
             base, ext = os.path.splitext(name)
-            # 用锁保证选名 + 移动是原子的，避免两个线程选到同一个 target
             with _FINALIZE_LOCK:
                 target = os.path.join(SHARED_DIR, name)
                 n = 1
@@ -1153,6 +1444,9 @@ class Handler(BaseHTTPRequestHandler):
             to_names = [get_client_name(t) or t for t in to_clients]
             set_file_meta(final_name, from_client, to_clients,
                           from_name, to_names, cid)
+
+            # ★ 异步生成缩略图（不阻塞响应）
+            _generate_thumbnail_async(target, final_name)
 
             _finish_transfer(tid, True)
             if to_clients:
@@ -1348,7 +1642,6 @@ class Handler(BaseHTTPRequestHandler):
         from_key = client_key(info.get("from_client", ""))
 
         if not from_key:
-            # 无主文件：视为服务端所有，只有本机可以改权限
             if me != _LOCAL_KEY:
                 self._json(
                     {"error": "该文件由服务端管理，只有服务端可以修改权限"},
@@ -1361,7 +1654,6 @@ class Handler(BaseHTTPRequestHandler):
         from_name = get_client_name(me) or me
         to_names = [get_client_name(t) or t for t in to_clients]
 
-        # 不传 cid，保留原有的 cid 字段
         set_file_meta(name, me, to_clients, from_name, to_names)
 
         if to_clients:
@@ -1539,6 +1831,7 @@ class App:
         os.makedirs(SHARED_DIR, exist_ok=True)
         os.makedirs(DATA_DIR, exist_ok=True)
         os.makedirs(PARTIAL_DIR, exist_ok=True)
+        os.makedirs(THUMB_DIR, exist_ok=True)
         _migrate_legacy_data()
 
         httpd, port = None, PORT
@@ -1555,6 +1848,12 @@ class App:
         self.httpd = httpd
         self.port = port
         push_log(f"✓ 服务已启动，端口 {port}")
+
+        if _HAS_PIL:
+            extra = "（含 HEIC）" if _HAS_HEIF else ""
+            push_log(f"🖼 缩略图已启用{extra}")
+        else:
+            push_log("⚠️ 未检测到 Pillow，图片缩略图将使用原图")
 
     def _stop_server(self):
         try:
