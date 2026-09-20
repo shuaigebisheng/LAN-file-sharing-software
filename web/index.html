@@ -4,19 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<script>
-  // 为旧版浏览器添加 Promise.withResolvers 支持
-  if (typeof Promise.withResolvers !== 'function') {
-    Promise.withResolvers = function() {
-      let resolve, reject;
-      const promise = new Promise((res, rej) => {
-        resolve = res;
-        reject = rej;
-      });
-      return { promise, resolve, reject };
-    };
-  }
-</script>
 <title>局域网互传</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -154,6 +141,22 @@
     </div>
 
     <ul class="file-list" id="fileList"></ul>
+
+    <div class="files-pager" id="filesPager" hidden>
+      <button type="button" class="pager-btn" id="pagerFirst" title="第一页">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>
+      </button>
+      <button type="button" class="pager-btn" id="pagerPrev" title="上一页">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <span class="pager-info" id="pagerInfo">1 / 1</span>
+      <button type="button" class="pager-btn" id="pagerNext" title="下一页">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+      <button type="button" class="pager-btn" id="pagerLast" title="最后一页">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>
+      </button>
+    </div>
   </section>
 
   <footer class="foot">

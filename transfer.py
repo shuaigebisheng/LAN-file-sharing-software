@@ -9,8 +9,9 @@
 - 支持多选打包下载（zip）
 - 客户端 token 隔离 part 分片，避免跨客户端覆盖
 - 无主文件视为服务端所有，默认公开，只有服务端能改权限
-- /api/files 支持 ETag，无变化时返回 304
+- /api/files 支持 ETag + 分页 + 分类/搜索/排序
 - 可选集成 Pillow 生成真缩略图（未安装时优雅降级为原图）
+- 缩略图未就绪时返回占位图（302），前端自动重试
 
 依赖（可选）：
     Pillow      —— 生成图片缩略图（建议安装）
@@ -58,19 +59,16 @@ try:
     from PIL import Image, ImageOps
     _HAS_PIL = True
 
-    # 防止超大图片引发内存爆炸（约 200M 像素，14142 × 14142）
     try:
         Image.MAX_IMAGE_PIXELS = 200 * 1000 * 1000
     except Exception:
         pass
 
-    # Pillow 9.1+ 用 Image.Resampling.LANCZOS，旧版用 Image.LANCZOS
     try:
         _THUMB_RESAMPLE = Image.Resampling.LANCZOS
     except AttributeError:
         _THUMB_RESAMPLE = Image.LANCZOS
 
-    # 尝试注册 HEIC（如果用户装了 pillow-heif）
     try:
         import pillow_heif  # type: ignore
         pillow_heif.register_heif_opener()
@@ -91,14 +89,12 @@ except ImportError:
 # =====================================================================
 
 def _get_base_dir():
-    """exe / 脚本所在目录，用于放 shared/ 等可写数据。"""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 
 def _get_bundle_dir():
-    """打包进去的资源目录（PyInstaller onefile 的临时解压目录）。"""
     if getattr(sys, "frozen", False):
         return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
@@ -108,22 +104,28 @@ BASE_DIR    = _get_base_dir()
 BUNDLE_DIR  = _get_bundle_dir()
 WEB_DIR     = os.path.join(BASE_DIR, "web")
 SHARED_DIR  = os.path.join(BASE_DIR, "shared")
-DATA_DIR    = os.path.join(BASE_DIR, ".data")          # 内部数据，不对外
-PARTIAL_DIR = os.path.join(DATA_DIR, "partial")        # 固定在 .data 下
-THUMB_DIR   = os.path.join(DATA_DIR, "thumbs")         # ★ 缩略图缓存
+DATA_DIR    = os.path.join(BASE_DIR, ".data")
+PARTIAL_DIR = os.path.join(DATA_DIR, "partial")
+THUMB_DIR   = os.path.join(DATA_DIR, "thumbs")
 PORT  = 8000
 CHUNK = 64 * 1024
 
-# 缩略图参数
-THUMB_MAX_SIZE = (240, 240)    # 最大边
-THUMB_QUALITY  = 78            # JPEG 质量
+THUMB_MAX_SIZE = (240, 240)
+THUMB_QUALITY  = 78
+
+# 缩略图未就绪时的占位图（内嵌 SVG，几百字节）
+_THUMB_PLACEHOLDER_PATH = "/static/thumb-pending.svg"
+_THUMB_PLACEHOLDER_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" '
+    'width="240" height="240">'
+    '<circle cx="108" cy="100" r="10" fill="rgba(128,128,128,0.4)"/>'
+    '<path d="M64 158l38-42 30 34 18-18 26 26z" '
+    'fill="rgba(128,128,128,0.25)"/>'
+    '</svg>'
+).encode("utf-8")
 
 
 def read_web_file(name):
-    """
-    读取 web/ 下的文件。优先用 exe 旁边的 web/（用户可改），
-    找不到再读打包进程序内部的 web/（默认资源）。
-    """
     safe = os.path.basename(name)
     candidates = [
         os.path.join(BASE_DIR, "web", safe),
@@ -139,12 +141,6 @@ def read_web_file(name):
 
 
 def set_shared_dir(new_dir):
-    """
-    切换共享目录。
-
-    PARTIAL_DIR 不跟着切换，仍然固定在 DATA_DIR/partial。
-    同时清空缩略图缓存（新目录里可能有同名但内容不同的文件）。
-    """
     global SHARED_DIR
     new_dir = os.path.abspath(new_dir)
     if new_dir == SHARED_DIR:
@@ -159,7 +155,6 @@ def set_shared_dir(new_dir):
         return False, str(e)
     SHARED_DIR = new_dir
 
-    # ★ 清空缩略图缓存，避免旧目录的缩略图被误用
     try:
         if os.path.isdir(THUMB_DIR):
             shutil.rmtree(THUMB_DIR, ignore_errors=True)
@@ -170,9 +165,6 @@ def set_shared_dir(new_dir):
 
 
 def _migrate_legacy_data():
-    """
-    把旧版本遗留在 shared/ 下的内部文件搬到 .data/。
-    """
     old_meta = os.path.join(SHARED_DIR, ".meta.json")
     new_meta = os.path.join(DATA_DIR, "meta.json")
     try:
@@ -207,7 +199,6 @@ _CID_SAFE_RE = re.compile(r"[^a-zA-Z0-9._-]")
 
 
 def _normalize_cid(raw):
-    """把前端传来的 cid 清洗成安全短字符串。"""
     if not raw:
         return ""
     s = _CID_SAFE_RE.sub("_", str(raw).strip())
@@ -215,9 +206,6 @@ def _normalize_cid(raw):
 
 
 def _part_path(name, size, cid=""):
-    """
-    part 分片路径：{PARTIAL_DIR}/{cid}.{name}.{size}.part
-    """
     safe = os.path.basename(name)
     prefix = (cid + ".") if cid else ""
     return os.path.join(PARTIAL_DIR, f"{prefix}{safe}.{size}.part")
@@ -227,13 +215,12 @@ def _part_path(name, size, cid=""):
 #  缩略图
 # =====================================================================
 
-_THUMB_SEM = threading.Semaphore(2)    # 最多 2 个线程同时生成缩略图
-_THUMB_FAILED = set()                  # 已失败过的文件名（避免反复重试）
+_THUMB_SEM = threading.Semaphore(2)
+_THUMB_FAILED = set()
 _THUMB_FAILED_LOCK = threading.Lock()
 
 
 def _thumb_path(name):
-    """缩略图文件路径。统一用 .jpg 后缀。"""
     safe = os.path.basename(name)
     return os.path.join(THUMB_DIR, safe + ".jpg")
 
@@ -244,10 +231,6 @@ def _is_image_file(name):
 
 
 def _generate_thumbnail_sync(src_path, name):
-    """
-    同步生成缩略图。返回 True / False。
-    失败时把文件名加入 _THUMB_FAILED，避免反复重试。
-    """
     if not _HAS_PIL:
         return False
 
@@ -258,13 +241,11 @@ def _generate_thumbnail_sync(src_path, name):
         os.makedirs(THUMB_DIR, exist_ok=True)
 
         with Image.open(src_path) as im:
-            # EXIF 方向修正（失败不影响主流程）
             try:
                 im = ImageOps.exif_transpose(im)
             except Exception:
                 pass
 
-            # 统一转 RGB（JPEG 不支持透明 / 调色板）
             if im.mode != "RGB":
                 has_alpha = im.mode in ("RGBA", "LA") or \
                             (im.mode == "P" and "transparency" in im.info)
@@ -295,10 +276,6 @@ def _generate_thumbnail_sync(src_path, name):
 
 
 def _generate_thumbnail_async(src_path, name):
-    """
-    异步生成缩略图，不阻塞上传响应。
-    并发由 _THUMB_SEM 控制，最多 2 个线程同时跑。
-    """
     if not _HAS_PIL:
         return
     if not _is_image_file(name):
@@ -317,6 +294,44 @@ def _generate_thumbnail_async(src_path, name):
     t = threading.Thread(target=_job, daemon=True,
                          name="thumb-" + name[:24])
     t.start()
+
+
+# =====================================================================
+#  文件分类（与前端 app.js 保持一致）
+# =====================================================================
+
+_CATEGORY_EXT_MAP = {
+    "img": {"jpg","jpeg","png","gif","webp","heic","bmp","svg","avif","ico"},
+    "vid": {"mp4","mov","mkv","avi","webm","flv","wmv","m4v"},
+    "aud": {"mp3","wav","flac","aac","m4a","ogg","opus"},
+    "doc": {
+        "pdf",
+        "doc","docx","rtf","odt",
+        "xls","xlsx","csv","ods",
+        "ppt","pptx","odp",
+        "txt","md","markdown","log",
+        "js","mjs","ts","tsx","jsx","py","rb","go","rs","java","kt","swift",
+        "c","cc","cpp","h","hpp","cs","php","sh","bash","zsh","sql",
+        "html","htm","css","scss","less","xml","json","yaml","yml","toml",
+        "ini","conf","cfg","env","vue","svelte",
+    },
+    "zip": {"zip","rar","7z","tar","gz","bz2","xz"},
+}
+
+_VALID_SORTS = (
+    "mtime_desc", "mtime_asc",
+    "size_desc", "size_asc",
+    "name_asc", "name_desc",
+)
+
+
+def _file_category(name):
+    idx = name.rfind(".")
+    ext = name[idx + 1:].lower() if idx >= 0 else ""
+    for cat, exts in _CATEGORY_EXT_MAP.items():
+        if ext in exts:
+            return cat
+    return "other"
 
 
 # =====================================================================
@@ -799,7 +814,7 @@ def fmt_speed(bps):
 # =====================================================================
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "FileDrop/2.7"
+    server_version = "FileDrop/2.9"
     protocol_version = "HTTP/1.1"
     timeout = 60
 
@@ -945,7 +960,7 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_qr_page(qs)
 
         elif path == "/api/files":
-            self._handle_files()
+            self._handle_files(qs)
 
         elif path == "/api/clients":
             self._handle_clients()
@@ -989,6 +1004,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve_static(self, path):
         rel = path[len("/static/"):]
+
+        # 占位图：直接返回内嵌 SVG，不读磁盘
+        if rel == "thumb-pending.svg":
+            self._send(200, _THUMB_PLACEHOLDER_SVG,
+                       "image/svg+xml; charset=utf-8",
+                       extra={"Cache-Control": "public, max-age=86400"})
+            return
+
         content = read_web_file(rel)
         if content is None:
             self._send(404, "Not Found")
@@ -1014,15 +1037,37 @@ class Handler(BaseHTTPRequestHandler):
         ctype = ctype_map.get(ext, "application/octet-stream")
         self._send(200, content, ctype)
 
-    # ---------------- 文件列表 ----------------
+    # ---------------- 文件列表（分页 + 过滤 + 排序） ----------------
 
-    def _handle_files(self):
+    def _handle_files(self, qs):
         me = self._me()
+
+        try:
+            limit = int((qs.get("limit") or ["60"])[0])
+        except (ValueError, TypeError):
+            limit = 60
+        limit = max(1, min(limit, 200))
+
+        try:
+            offset = int((qs.get("offset") or ["0"])[0])
+        except (ValueError, TypeError):
+            offset = 0
+        offset = max(0, offset)
+
+        category = (qs.get("category") or ["all"])[0].strip() or "all"
+        if category not in ("all", "img", "vid", "aud", "doc", "zip", "other"):
+            category = "all"
+
+        search = (qs.get("search") or [""])[0].strip()
+
+        sort = (qs.get("sort") or ["mtime_desc"])[0].strip()
+        if sort not in _VALID_SORTS:
+            sort = "mtime_desc"
 
         with META_LOCK:
             meta = _load_meta()
             dirty = False
-            file_entries = []
+            all_entries = []
 
             try:
                 with os.scandir(SHARED_DIR) as it:
@@ -1058,13 +1103,17 @@ class Handler(BaseHTTPRequestHandler):
                     info["added_at"] = int(st.st_mtime)
                     dirty = True
 
-                file_entries.append((name, st, info))
+                all_entries.append((name, st, info))
 
             if dirty:
                 _save_meta(meta)
 
-        # ---- ETag ----
-        etag = '"' + _compute_files_etag(me, file_entries) + '"'
+        etag_raw = (
+            _compute_files_etag(me, all_entries)
+            + f"-{limit}-{offset}-{category}-{sort}-{search}"
+        )
+        etag = '"' + hashlib.md5(etag_raw.encode("utf-8", "replace")).hexdigest() + '"'
+
         inm = ""
         if self.headers:
             inm = self.headers.get("If-None-Match", "") or ""
@@ -1077,11 +1126,52 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        files = []
-        for name, st, info in file_entries:
+        counts = {"all": len(all_entries), "img": 0, "vid": 0,
+                  "aud": 0, "doc": 0, "zip": 0, "other": 0}
+        for name, st, info in all_entries:
+            cat = _file_category(name)
+            counts[cat] = counts.get(cat, 0) + 1
+
+        if category != "all":
+            all_entries = [e for e in all_entries
+                           if _file_category(e[0]) == category]
+
+        if search:
+            s = search.lower()
+            all_entries = [e for e in all_entries if s in e[0].lower()]
+
+        if sort == "mtime_desc":
+            key = lambda x: int(x[2].get("added_at") or x[1].st_mtime)
+            reverse = True
+        elif sort == "mtime_asc":
+            key = lambda x: int(x[2].get("added_at") or x[1].st_mtime)
+            reverse = False
+        elif sort == "size_desc":
+            key = lambda x: x[1].st_size
+            reverse = True
+        elif sort == "size_asc":
+            key = lambda x: x[1].st_size
+            reverse = False
+        elif sort == "name_asc":
+            key = lambda x: x[0].lower()
+            reverse = False
+        elif sort == "name_desc":
+            key = lambda x: x[0].lower()
+            reverse = True
+        else:
+            key = lambda x: int(x[2].get("added_at") or x[1].st_mtime)
+            reverse = True
+
+        all_entries.sort(key=key, reverse=reverse)
+
+        total = len(all_entries)
+        page_entries = all_entries[offset:offset + limit]
+
+        items = []
+        for name, st, info in page_entries:
             to_keys = _get_to_clients(info)
             to_nms  = _get_to_names(info)
-            files.append({
+            items.append({
                 "name": name,
                 "size": st.st_size,
                 "mtime": int(st.st_mtime),
@@ -1091,9 +1181,15 @@ class Handler(BaseHTTPRequestHandler):
                 "to_names": to_nms,
                 "is_mine": _is_file_mine(info, me),
             })
-        files.sort(key=lambda x: x["added_at"], reverse=True)
 
-        body = json.dumps(files, ensure_ascii=False).encode("utf-8")
+        body = json.dumps({
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "counts": counts,
+        }, ensure_ascii=False).encode("utf-8")
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -1228,15 +1324,17 @@ class Handler(BaseHTTPRequestHandler):
         """
         缩略图端点。
 
-        优先返回 .data/thumbs/ 下的真缩略图（JPEG，几 KB）；
-        没有则返回原图字节，并在后台触发生成一次缩略图。
+        策略：
+          - 缩略图已生成 → 返回缩略图（JPEG，几 KB），强缓存
+          - 缩略图未生成 + Pillow 可用 → 302 重定向到内嵌占位图，
+            同时后台触发生成；前端识别占位图后会自动重试
+          - 缩略图未生成 + Pillow 不可用 → 回退原图（唯一例外）
         """
         safe = os.path.basename(name)
         if not safe:
             self._send(404, "Not Found")
             return
 
-        # 原文件必须存在
         shared_path = os.path.join(SHARED_DIR, safe)
         if not os.path.isfile(shared_path):
             self._send(404, "Not Found")
@@ -1249,24 +1347,43 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         thumb = _thumb_path(safe)
+
         if os.path.isfile(thumb):
+            # ---- 缩略图就绪 ----
             full = thumb
             ctype = "image/jpeg"
+            cache_control = "public, max-age=86400"
+            size = os.path.getsize(full)
+            mtime = int(os.path.getmtime(full))
+            etag = f'W/"{mtime}-{size}"'
+
         else:
-            full = shared_path
-            ctype = mimetypes.guess_type(safe)[0] or "application/octet-stream"
-            # 没有缩略图且是图片 → 后台生成，下次访问就是缩略图
-            if _HAS_PIL and ctype.startswith("image/"):
+            # ---- 缩略图未就绪 ----
+            src_ctype = mimetypes.guess_type(safe)[0] or ""
+
+            if _HAS_PIL and src_ctype.startswith("image/"):
+                # 触发后台生成，同时 302 到占位图
                 _generate_thumbnail_async(shared_path, safe)
 
-        size = os.path.getsize(full)
-        mtime = int(os.path.getmtime(full))
-        etag = f'W/"{mtime}-{size}"'
+                self.send_response(302)
+                self.send_header("Location", _THUMB_PLACEHOLDER_PATH)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+
+            # 没 Pillow：只能返回原图
+            full = shared_path
+            ctype = src_ctype or "application/octet-stream"
+            cache_control = "no-cache"
+            size = os.path.getsize(full)
+            mtime = int(os.path.getmtime(full))
+            etag = f'W/"{mtime}-{size}"'
 
         if self.headers.get("If-None-Match") == etag:
             self.send_response(304)
             self.send_header("ETag", etag)
-            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Cache-Control", cache_control)
             self.end_headers()
             return
 
@@ -1274,7 +1391,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(size))
         self.send_header("ETag", etag)
-        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Cache-Control", cache_control)
         self.end_headers()
 
         if self.command == "HEAD":
@@ -1445,7 +1562,6 @@ class Handler(BaseHTTPRequestHandler):
             set_file_meta(final_name, from_client, to_clients,
                           from_name, to_names, cid)
 
-            # ★ 异步生成缩略图（不阻塞响应）
             _generate_thumbnail_async(target, final_name)
 
             _finish_transfer(tid, True)
@@ -1599,7 +1715,7 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
-    # ---------------- 修改权限（只有发送者 / 服务端能改） ----------------
+    # ---------------- 修改权限 ----------------
 
     def _handle_permission(self):
         try:
