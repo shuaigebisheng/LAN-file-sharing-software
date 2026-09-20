@@ -4,6 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
+<script>
+  // 为旧版浏览器添加 Promise.withResolvers 支持
+  if (typeof Promise.withResolvers !== 'function') {
+    Promise.withResolvers = function() {
+      let resolve, reject;
+      const promise = new Promise((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    };
+  }
+</script>
 <title>局域网互传</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
