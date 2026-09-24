@@ -12,10 +12,15 @@
 - /api/files 支持 ETag + 分页 + 分类/搜索/排序
 - 可选集成 Pillow 生成真缩略图（未安装时优雅降级为原图）
 - 缩略图未就绪时返回占位图（302），前端自动重试
+- Office 文件（docx/xlsx/pptx）预览：
+    * 优先：调用外部 LibreOffice（soffice）转 PDF，PDF.js 渲染（高保真）
+    * 兜底：纯 Python zipfile + xml.etree 解析（未装 LibreOffice 时）
+    * 可通过环境变量 SOFFICE_PATH 指定 soffice 路径
 
 依赖（可选）：
     Pillow      —— 生成图片缩略图（建议安装）
     pillow-heif —— 支持 HEIC 缩略图（可选）
+    LibreOffice —— Office 文件高保真预览（可选，未装则自动降级）
 必装：
     qr.py
     web/index.html, web/style.css, web/app.js, web/qr.html
@@ -43,6 +48,9 @@ import webbrowser
 import collections
 import subprocess
 import urllib.parse
+import posixpath
+import html as _html
+import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import tkinter as tk
@@ -107,6 +115,7 @@ SHARED_DIR  = os.path.join(BASE_DIR, "shared")
 DATA_DIR    = os.path.join(BASE_DIR, ".data")
 PARTIAL_DIR = os.path.join(DATA_DIR, "partial")
 THUMB_DIR   = os.path.join(DATA_DIR, "thumbs")
+OFFICE_PDF_CACHE_DIR = os.path.join(DATA_DIR, "office_pdf_cache")
 PORT  = 8000
 CHUNK = 64 * 1024
 
@@ -158,6 +167,12 @@ def set_shared_dir(new_dir):
     try:
         if os.path.isdir(THUMB_DIR):
             shutil.rmtree(THUMB_DIR, ignore_errors=True)
+    except OSError:
+        pass
+
+    try:
+        if os.path.isdir(OFFICE_PDF_CACHE_DIR):
+            shutil.rmtree(OFFICE_PDF_CACHE_DIR, ignore_errors=True)
     except OSError:
         pass
 
@@ -306,9 +321,14 @@ _CATEGORY_EXT_MAP = {
     "aud": {"mp3","wav","flac","aac","m4a","ogg","opus"},
     "doc": {
         "pdf",
-        "doc","docx","rtf","odt",
-        "xls","xlsx","csv","ods",
-        "ppt","pptx","odp",
+        # Word
+        "doc","docx","docm","dot","dotx","dotm","rtf","odt","ott","fodt",
+        # Excel
+        "xls","xlsx","xlsm","xlsb","xltx","xltm","ods","ots","fods",
+        # PowerPoint
+        "ppt","pptx","pptm","pps","ppsx","pot","potx","potm","odp","otp","fodp",
+        # 其他文档
+        "csv","tsv",
         "txt","md","markdown","log",
         "js","mjs","ts","tsx","jsx","py","rb","go","rs","java","kt","swift",
         "c","cc","cpp","h","hpp","cs","php","sh","bash","zsh","sql",
@@ -332,6 +352,527 @@ def _file_category(name):
         if ext in exts:
             return cat
     return "other"
+
+
+# =====================================================================
+#  OOXML 预览（docx / xlsx / pptx 纯 Python 解析 · 兜底）
+#  这些格式本质是 zip + XML，用标准库即可提取文本/表格
+# =====================================================================
+
+# 纯 Python 能解析的 OOXML 后缀（zip + XML）
+_OOXML_EXTS = {"docx", "xlsx", "pptx"}
+
+# 全部 Office 后缀（LibreOffice 能处理的范围）
+_OFFICE_EXTS = {
+    # ---- Word ----
+    "docx", "docm", "dotx", "dotm",     # OOXML
+    "doc",  "dot",  "rtf",               # 旧版二进制 / RTF
+    "odt",  "ott",  "fodt",              # OpenDocument
+
+    # ---- Excel ----
+    "xlsx", "xlsm", "xltx", "xltm",      # OOXML
+    "xls",  "xlsb",                      # 旧版二进制
+    "ods",  "ots",  "fods",              # OpenDocument
+
+    # ---- PowerPoint ----
+    "pptx", "pptm", "potx", "potm",      # OOXML
+    "ppt",  "pps",  "ppsx", "pot",       # 旧版二进制
+    "odp",  "otp",  "fodp",              # OpenDocument
+}
+_OOXML_MAX_FILE  = 200 * 1024 * 1024   # 整个文件上限 200MB
+_OOXML_MAX_PART  = 50  * 1024 * 1024   # 单个 XML 部件上限 50MB
+_XLSX_MAX_ROWS   = 500                 # 每张工作表最多渲染行数
+_XLSX_MAX_COLS   = 50                  # 每行最多渲染列数
+
+
+def _xml_local_name(tag):
+    """去掉 XML 命名空间前缀，返回本地名称。"""
+    if not isinstance(tag, str):
+        return ""
+    if tag.startswith("{"):
+        i = tag.find("}")
+        return tag[i + 1:] if i >= 0 else tag
+    return tag
+
+
+def _safe_parse_xml(zf, name, max_size=_OOXML_MAX_PART):
+    """安全地解析 zip 内某个 XML 部件。返回 ElementTree 或 None。"""
+    try:
+        info = zf.getinfo(name)
+    except KeyError:
+        return None
+    if info.file_size > max_size:
+        return None
+    try:
+        with zf.open(name) as f:
+            return ET.parse(f)
+    except (ET.ParseError, OSError, ValueError, EOFError):
+        return None
+
+
+# ---------- docx ----------
+
+def _docx_para_text(p):
+    parts = []
+    for node in p.iter():
+        ln = _xml_local_name(node.tag)
+        if ln == "t":
+            if node.text:
+                parts.append(node.text)
+        elif ln == "tab":
+            parts.append("\t")
+        elif ln == "br":
+            parts.append("\n")
+    return "".join(parts)
+
+
+def _docx_table_rows(tbl):
+    rows = []
+    for tr in tbl:
+        if _xml_local_name(tr.tag) != "tr":
+            continue
+        cells = []
+        for tc in tr:
+            if _xml_local_name(tc.tag) != "tc":
+                continue
+            paras = []
+            for p in tc:
+                if _xml_local_name(p.tag) == "p":
+                    paras.append(_docx_para_text(p))
+            cells.append("\n".join(paras))
+        rows.append(cells)
+    return rows
+
+
+def _render_docx(zf):
+    tree = _safe_parse_xml(zf, "word/document.xml")
+    if tree is None:
+        return None
+    root = tree.getroot()
+    body = None
+    for elem in root.iter():
+        if _xml_local_name(elem.tag) == "body":
+            body = elem
+            break
+    if body is None:
+        body = root
+
+    out = []
+    for child in body:
+        ln = _xml_local_name(child.tag)
+        if ln == "p":
+            text = _docx_para_text(child)
+            if text:
+                out.append("<p>" + _html.escape(text) + "</p>")
+            else:
+                out.append("<p>&nbsp;</p>")
+        elif ln == "tbl":
+            rows = _docx_table_rows(child)
+            if rows:
+                out.append('<table class="ooxml-table">')
+                for row in rows:
+                    out.append("<tr>")
+                    for cell in row:
+                        out.append(
+                            "<td>" +
+                            _html.escape(cell).replace("\n", "<br>") +
+                            "</td>"
+                        )
+                    out.append("</tr>")
+                out.append("</table>")
+    return "".join(out) if out else None
+
+
+# ---------- xlsx ----------
+
+def _xlsx_col_index(ref):
+    """从单元格引用（如 'AB12'）解析出 0 起始的列索引。"""
+    n = 0
+    for ch in ref:
+        if "A" <= ch <= "Z":
+            n = n * 26 + (ord(ch) - 64)
+        elif "a" <= ch <= "z":
+            n = n * 26 + (ord(ch) - 96)
+        else:
+            break
+    return max(0, n - 1)
+
+
+def _xlsx_cell_text(cell, shared):
+    t = cell.get("t") or "n"
+    v = None
+    inline_parts = None
+    for child in cell:
+        ln = _xml_local_name(child.tag)
+        if ln == "v":
+            v = child.text or ""
+            break
+        if ln == "is":
+            parts = []
+            for n in child.iter():
+                if _xml_local_name(n.tag) == "t" and n.text:
+                    parts.append(n.text)
+            inline_parts = parts
+            break
+    if inline_parts is not None:
+        return "".join(inline_parts)
+    if v is None:
+        return ""
+    if t == "s":
+        try:
+            idx = int(v)
+            return shared[idx] if 0 <= idx < len(shared) else ""
+        except (ValueError, IndexError):
+            return ""
+    if t == "b":
+        return "TRUE" if v == "1" else "FALSE"
+    if t in ("e", "str"):
+        return v
+    return v  # 数字或普通字符串
+
+
+def _xlsx_sheet_rows(root, shared):
+    rows = []
+    for row_elem in root.iter():
+        if _xml_local_name(row_elem.tag) != "row":
+            continue
+        if len(rows) >= _XLSX_MAX_ROWS:
+            break
+        row_data = []
+        for cell in row_elem:
+            if _xml_local_name(cell.tag) != "c":
+                continue
+            if len(row_data) >= _XLSX_MAX_COLS:
+                break
+            ref = cell.get("r") or ""
+            if ref:
+                col = _xlsx_col_index(ref)
+                if col >= _XLSX_MAX_COLS:
+                    continue
+                while len(row_data) < col:
+                    row_data.append("")
+            row_data.append(_xlsx_cell_text(cell, shared))
+        while row_data and row_data[-1] == "":
+            row_data.pop()
+        rows.append(row_data)
+    while rows and not rows[-1]:
+        rows.pop()
+    return rows
+
+
+def _render_xlsx(zf):
+    # 共享字符串表
+    shared = []
+    tree = _safe_parse_xml(zf, "xl/sharedStrings.xml")
+    if tree is not None:
+        for si in tree.getroot():
+            if _xml_local_name(si.tag) != "si":
+                continue
+            parts = []
+            for n in si.iter():
+                if _xml_local_name(n.tag) == "t" and n.text:
+                    parts.append(n.text)
+            shared.append("".join(parts))
+
+    # workbook.xml：工作表名 + rId
+    names_by_rid = {}
+    tree = _safe_parse_xml(zf, "xl/workbook.xml")
+    if tree is not None:
+        for sh in tree.getroot().iter():
+            if _xml_local_name(sh.tag) != "sheet":
+                continue
+            rid = None
+            for k, v in sh.attrib.items():
+                if _xml_local_name(k) == "id":
+                    rid = v
+                    break
+            name = sh.get("name")
+            if rid and name:
+                names_by_rid[rid] = name
+
+    # xl/_rels/workbook.xml.rels：rId → 工作表路径
+    rid_to_path = {}
+    tree = _safe_parse_xml(zf, "xl/_rels/workbook.xml.rels")
+    if tree is not None:
+        for rel in tree.getroot():
+            rid = rel.get("Id")
+            target = rel.get("Target")
+            if not rid or not target:
+                continue
+            if target.startswith("/"):
+                path = target.lstrip("/")
+            else:
+                path = "xl/" + target
+            path = posixpath.normpath(path)
+            rid_to_path[rid] = path
+
+    # 按 workbook 顺序排列
+    ordered = []
+    for rid, name in names_by_rid.items():
+        if rid in rid_to_path:
+            ordered.append((name, rid_to_path[rid]))
+
+    if not ordered:
+        # 回退：按 sheetN.xml 数字顺序
+        cand = []
+        for n in zf.namelist():
+            if not n.startswith("xl/worksheets/sheet") or not n.endswith(".xml"):
+                continue
+            tail = n[len("xl/worksheets/"):]
+            if "/" in tail:
+                continue
+            m = re.match(r"sheet(\d+)\.xml$", tail)
+            if m:
+                cand.append((int(m.group(1)), n))
+        cand.sort()
+        for i, (_, path) in enumerate(cand):
+            ordered.append((f"Sheet{i + 1}", path))
+
+    out = []
+    for name, path in ordered:
+        tree = _safe_parse_xml(zf, path)
+        if tree is None:
+            continue
+        rows = _xlsx_sheet_rows(tree.getroot(), shared)
+        if not rows:
+            continue
+        out.append('<div class="ooxml-sheet">')
+        out.append(f"<h3>{_html.escape(name)}</h3>")
+        out.append('<table class="ooxml-table">')
+        for row in rows:
+            out.append("<tr>")
+            for cell in row:
+                out.append("<td>" + _html.escape(cell) + "</td>")
+            out.append("</tr>")
+        out.append("</table></div>")
+    return "".join(out) if out else None
+
+
+# ---------- pptx ----------
+
+def _render_pptx(zf):
+    slides = []
+    for n in zf.namelist():
+        if not n.startswith("ppt/slides/slide") or not n.endswith(".xml"):
+            continue
+        tail = n[len("ppt/slides/"):]
+        if "/" in tail:
+            continue
+        m = re.match(r"slide(\d+)\.xml$", tail)
+        if m:
+            slides.append((int(m.group(1)), n))
+    slides.sort()
+    if not slides:
+        return None
+
+    out = []
+    for i, (_, path) in enumerate(slides):
+        tree = _safe_parse_xml(zf, path)
+        if tree is None:
+            continue
+        paragraphs = []
+        for p in tree.getroot().iter():
+            if _xml_local_name(p.tag) != "p":
+                continue
+            parts = []
+            for t in p.iter():
+                if _xml_local_name(t.tag) == "t" and t.text:
+                    parts.append(t.text)
+            text = "".join(parts)
+            if text:
+                paragraphs.append(text)
+        if not paragraphs:
+            continue
+        out.append('<div class="ooxml-slide">')
+        out.append(f"<h3>第 {i + 1} 页</h3>")
+        out.append("<pre>" + _html.escape("\n".join(paragraphs)) + "</pre>")
+        out.append("</div>")
+    return "".join(out) if out else None
+
+
+def _render_ooxml(full_path, ext):
+    """对外统一入口：返回 HTML 字符串或 None。"""
+    try:
+        size = os.path.getsize(full_path)
+    except OSError:
+        return None
+    if size > _OOXML_MAX_FILE:
+        return None
+    # docx 已由前端 docx-preview 处理，这里不再解析
+    if ext == "docx":
+        return None
+    if not zipfile.is_zipfile(full_path):
+        return None
+    try:
+        with zipfile.ZipFile(full_path, "r") as zf:
+            if ext == "xlsx":
+                return _render_xlsx(zf)
+            if ext == "pptx":
+                return _render_pptx(zf)
+    except (zipfile.BadZipFile, OSError, RuntimeError, ValueError):
+        return None
+    return None
+
+
+# =====================================================================
+#  LibreOffice：探测 / 转 PDF / 缓存
+# =====================================================================
+
+_SOFFICE_PATH = None        # None = 未探测；"" = 不可用；其他 = 路径
+_SOFFICE_LOCK = threading.Lock()
+_OFFICE_PDF_LOCK = threading.Lock()
+
+
+def _find_soffice():
+    """返回 soffice 可执行文件路径，未找到返回空字符串。"""
+    global _SOFFICE_PATH
+    with _SOFFICE_LOCK:
+        if _SOFFICE_PATH is not None:
+            return _SOFFICE_PATH
+
+        candidates = []
+
+        # 1) 环境变量覆盖
+        env = os.environ.get("SOFFICE_PATH")
+        if env:
+            candidates.append(env)
+
+        # 2) PATH 中查找
+        for name in ("soffice", "libreoffice"):
+            try:
+                p = shutil.which(name)
+            except Exception:
+                p = None
+            if p:
+                candidates.append(p)
+
+        # 3) 常见安装位置
+        if sys.platform == "win32":
+            candidates += [
+                r"C:\Program Files\LibreOffice\program\soffice.exe",
+                r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+            ]
+        elif sys.platform == "darwin":
+            candidates.append(
+                "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+            )
+
+        for path in candidates:
+            if path and os.path.isfile(path):
+                _SOFFICE_PATH = path
+                push_log(f"📄 检测到 LibreOffice：{path}")
+                return path
+
+        _SOFFICE_PATH = ""
+        push_log("⚠️ 未检测到 LibreOffice，Office 预览将使用纯文本模式")
+        return ""
+
+
+def _office_pdf_cache_path(name, src_path):
+    try:
+        mtime = int(os.path.getmtime(src_path))
+    except OSError:
+        return None
+    key = hashlib.md5(f"{name}|{mtime}".encode("utf-8")).hexdigest()
+    return os.path.join(OFFICE_PDF_CACHE_DIR, key + ".pdf")
+
+
+def _ensure_office_pdf(name, src_path):
+    """转换并缓存 PDF。成功返回 PDF 路径，失败返回 None。"""
+    soffice = _find_soffice()
+    if not soffice:
+        return None
+
+    cached = _office_pdf_cache_path(name, src_path)
+    if cached is None:
+        return None
+
+    with _OFFICE_PDF_LOCK:
+        if os.path.isfile(cached):
+            return cached
+
+        try:
+            os.makedirs(OFFICE_PDF_CACHE_DIR, exist_ok=True)
+        except OSError as e:
+            push_log(f"[error] 创建 PDF 缓存目录失败: {e}")
+            return None
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="oo_") as tmp:
+                try:
+                    result = subprocess.run(
+                        [
+                            soffice,
+                            "--headless",
+                            "--norestore",
+                            "--convert-to", "pdf",
+                            "--outdir", tmp,
+                            src_path,
+                        ],
+                        capture_output=True,
+                        timeout=120,
+                    )
+                except subprocess.TimeoutExpired:
+                    push_log(f"[error] LibreOffice 转换超时: {name}")
+                    return None
+                except OSError as e:
+                    push_log(f"[error] LibreOffice 调用失败: {e}")
+                    return None
+
+                if result.returncode != 0:
+                    stderr = (result.stderr or b"").decode(
+                        "utf-8", "replace")[:400]
+                    push_log(f"[error] LibreOffice 转换失败: {name} - {stderr}")
+                    return None
+
+                base = os.path.splitext(os.path.basename(src_path))[0]
+                produced = os.path.join(tmp, base + ".pdf")
+                if not os.path.isfile(produced):
+                    pdfs = [f for f in os.listdir(tmp)
+                            if f.lower().endswith(".pdf")]
+                    if not pdfs:
+                        push_log(f"[error] LibreOffice 未产出 PDF: {name}")
+                        return None
+                    produced = os.path.join(tmp, pdfs[0])
+
+                tmp_target = cached + ".tmp"
+                try:
+                    shutil.move(produced, tmp_target)
+                    os.replace(tmp_target, cached)
+                except OSError as e:
+                    push_log(f"[error] 写入 PDF 缓存失败: {e}")
+                    return None
+        except Exception as e:
+            # 兜底：任何未预期的异常都不影响主流程，只是本次转换失败
+            push_log(f"[error] Office → PDF 转换异常: {name} - {e}")
+            return None
+
+        return cached
+
+def _cleanup_office_pdf_cache(max_files=200):
+    """简单清理：缓存文件数超过上限时删掉最旧的一批。"""
+    try:
+        if not os.path.isdir(OFFICE_PDF_CACHE_DIR):
+            return
+        entries = []
+        for fn in os.listdir(OFFICE_PDF_CACHE_DIR):
+            if not fn.endswith(".pdf"):
+                continue
+            p = os.path.join(OFFICE_PDF_CACHE_DIR, fn)
+            try:
+                entries.append((os.path.getmtime(p), p))
+            except OSError:
+                continue
+        if len(entries) <= max_files:
+            return
+        entries.sort()
+        for _, p in entries[:len(entries) - max_files]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 # =====================================================================
@@ -965,6 +1506,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/clients":
             self._handle_clients()
 
+        elif path == "/api/ooxml":
+            self._handle_ooxml(qs)
+
+        elif path == "/api/office-pdf":
+            self._handle_office_pdf(qs)
+
         elif path == "/upload/status":
             self._handle_status(qs)
 
@@ -1216,6 +1763,163 @@ class Handler(BaseHTTPRequestHandler):
             })
         out.sort(key=lambda x: (not x["is_self"], x["name"]))
         self._json(out)
+
+    # ---------------- OOXML 预览（docx/xlsx/pptx） ----------------
+
+    def _handle_ooxml(self, qs):
+        name = os.path.basename((qs.get("name") or [""])[0].strip())
+        if not name:
+            self._json({"error": "缺少文件名"}, 400)
+            return
+
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        if ext not in _OFFICE_EXTS:
+            self._json({"error": "不支持的文件类型"}, 400)
+            return
+
+        full = os.path.join(SHARED_DIR, name)
+        if not os.path.isfile(full):
+            self._json({"error": "文件不存在"}, 404)
+            return
+
+        me = self._me()
+        meta = _load_meta()
+        if not can_access(name, me, meta):
+            self._json({"error": "无访问权限"}, 403)
+            return
+
+        # ---------- 优先：LibreOffice 转 PDF ----------
+        if _find_soffice():
+            pdf_path = _ensure_office_pdf(name, full)
+            if pdf_path:
+                # 顺手做一次轻量 GC
+                _cleanup_office_pdf_cache()
+                self._json({
+                    "mode": "pdf",
+                    "url": "/api/office-pdf?name=" + urllib.parse.quote(name),
+                })
+                return
+            # 转换失败 → 落到下面的 HTML 兜底
+
+        # ---------- 兜底：纯 Python 解析（仅限 OOXML 系列） ----------
+        if ext in _OOXML_EXTS:
+            try:
+                html = _render_ooxml(full, ext)
+            except Exception as e:
+                push_log(f"[error] 解析 {ext} 失败 {name}: {e}")
+                html = None
+
+            if html is not None:
+                self._json({"mode": "html", "html": html})
+                return
+
+        # 走到这里说明：
+        # - 没装 LibreOffice（或转换失败）
+        # - 又不是 OOXML 系列
+        # → 只能提示下载
+        self._json({"error": "无法预览该文件（请下载后用 Office 打开）"}, 422)
+
+    # ---------------- Office → PDF（流式下载，支持 Range） ----------------
+
+    def _handle_office_pdf(self, qs):
+        name = os.path.basename((qs.get("name") or [""])[0].strip())
+        if not name:
+            self._send(400, "缺少文件名")
+            return
+
+        full = os.path.join(SHARED_DIR, name)
+        if not os.path.isfile(full):
+            self._send(404, "文件不存在")
+            return
+
+        me = self._me()
+        meta = _load_meta()
+        if not can_access(name, me, meta):
+            self._send(403, "无访问权限")
+            return
+
+        if not _find_soffice():
+            self._send(404, "LibreOffice 不可用")
+            return
+
+        pdf_path = _ensure_office_pdf(name, full)
+        if not pdf_path or not os.path.isfile(pdf_path):
+            self._send(500, "文档转换失败")
+            return
+
+        try:
+            size = os.path.getsize(pdf_path)
+        except OSError:
+            self._send(500, "文件读取失败")
+            return
+
+        # 解析 Range（PDF.js 会用）
+        range_header = (self.headers.get("Range", "") if self.headers else "") or ""
+        start, end = 0, size - 1
+        is_range = False
+
+        if range_header.startswith("bytes="):
+            try:
+                spec = range_header[6:].split(",")[0].strip()
+                if "-" in spec:
+                    s_str, e_str = spec.split("-", 1)
+                    s_str = s_str.strip()
+                    e_str = e_str.strip()
+                    if s_str == "" and e_str:
+                        n = int(e_str)
+                        if n > 0:
+                            start = max(0, size - n)
+                            end = size - 1
+                            is_range = True
+                    elif s_str and e_str == "":
+                        start = int(s_str)
+                        end = size - 1
+                        is_range = True
+                    elif s_str and e_str:
+                        start = int(s_str)
+                        end = int(e_str)
+                        is_range = True
+
+                    if is_range:
+                        if start < 0 or end >= size or start > end:
+                            self.send_response(416)
+                            self.send_header("Content-Range", f"bytes */{size}")
+                            self.send_header("Content-Length", "0")
+                            self.end_headers()
+                            return
+            except (ValueError, IndexError):
+                is_range = False
+                start, end = 0, size - 1
+
+        length = end - start + 1
+
+        if is_range:
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        else:
+            self.send_response(200)
+
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        if self.command == "HEAD":
+            return
+
+        try:
+            with open(pdf_path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(CHUNK, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     # ---------------- 下载 ----------------
 
@@ -1970,6 +2674,12 @@ class App:
             push_log(f"🖼 缩略图已启用{extra}")
         else:
             push_log("⚠️ 未检测到 Pillow，图片缩略图将使用原图")
+
+        # 探测 LibreOffice，尽早把结果写进日志
+        try:
+            _find_soffice()
+        except Exception:
+            pass
 
     def _stop_server(self):
         try:

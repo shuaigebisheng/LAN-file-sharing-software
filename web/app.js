@@ -59,9 +59,12 @@ function fileExtClass(name){
   if(['mp3','wav','flac','aac','m4a','ogg','opus'].includes(ext))
     return ['aud', ext.slice(0,3)];
   if(ext === 'pdf') return ['pdf', 'PDF'];
-  if(['doc','docx','rtf','odt'].includes(ext))  return ['doc', ext.slice(0,3)];
-  if(['xls','xlsx','csv','ods'].includes(ext))  return ['sheet', ext.slice(0,3)];
-  if(['ppt','pptx','odp'].includes(ext))        return ['slide', ext.slice(0,3)];
+  if(['doc','docx','docm','dot','dotx','dotm','rtf','odt','ott','fodt'].includes(ext))
+    return ['doc', ext.slice(0,3)];
+  if(['xls','xlsx','xlsm','xlsb','xltx','xltm','ods','ots','fods'].includes(ext))
+    return ['sheet', ext.slice(0,3)];
+  if(['ppt','pptx','pptm','pps','ppsx','pot','potx','potm','odp','otp','fodp'].includes(ext))
+    return ['slide', ext.slice(0,3)];
   if(['zip','rar','7z','tar','gz','bz2','xz'].includes(ext))
     return ['zip', ext.slice(0,3)];
   if(['js','ts','jsx','tsx','py','rb','go','rs','java','kt','swift','c','cpp',
@@ -1779,6 +1782,25 @@ const PREVIEW_IMAGE_EXT = new Set(['jpg','jpeg','png','gif','webp','bmp','svg','
 const PREVIEW_VIDEO_EXT = new Set(['mp4','webm','ogv','mov']);
 const PREVIEW_AUDIO_EXT = new Set(['mp3','wav','ogg','oga','m4a','flac','aac','opus']);
 const PREVIEW_PDF_EXT   = new Set(['pdf']);
+// 走 /api/ooxml 端点的所有 Office 后缀
+const PREVIEW_OOXML_EXT = new Set([
+  // Word
+  'docx', 'docm', 'dotx', 'dotm',
+  'doc', 'dot', 'rtf',
+  'odt', 'ott', 'fodt',
+  // Excel
+  'xlsx', 'xlsm', 'xltx', 'xltm',
+  'xls', 'xlsb',
+  'ods', 'ots', 'fods',
+  // PowerPoint
+  'pptx', 'pptm', 'potx', 'potm',
+  'ppt', 'pps', 'ppsx', 'pot',
+  'odp', 'otp', 'fodp',
+]);
+
+// 前端 docx-preview 能直接渲染的子集
+// 这几个后缀内部结构一致（word/document.xml），docx-preview 都能处理
+const PREVIEW_DOCX_EXT = new Set(['docx', 'dotx', 'docm', 'dotm']);
 const PREVIEW_TEXT_EXT  = new Set([
   'txt','md','markdown','log','json','xml','yaml','yml','toml','ini','conf','cfg',
   'html','htm','css','scss','less','js','mjs','ts','tsx','jsx','vue','svelte',
@@ -1801,10 +1823,175 @@ function previewKind(name){
   if(PREVIEW_VIDEO_EXT.has(ext)) return 'video';
   if(PREVIEW_AUDIO_EXT.has(ext)) return 'audio';
   if(PREVIEW_PDF_EXT.has(ext))   return 'pdf';
+  if(PREVIEW_OOXML_EXT.has(ext)) return 'ooxml';
   if(PREVIEW_TEXT_EXT.has(ext))  return 'text';
   if(!ext && name && !name.startsWith('.')) return 'text';
   return 'other';
 }
+
+/* ---------------- PDF.js 渲染（供 pdf 和 ooxml→pdf 共用） ---------------- */
+
+function renderPdfInto(container, url, file){
+  const wrap = document.createElement('div');
+  wrap.className = 'preview-pdfjs';
+  container.appendChild(wrap);
+
+  let destroyed = false;
+  previewCleanupFns.push(() => { destroyed = true; });
+
+  const loading = document.createElement('div');
+  loading.className = 'pdfjs-loading';
+  loading.textContent = '正在加载 PDF…';
+  wrap.appendChild(loading);
+
+  (async () => {
+    try {
+      const pdfjsLib = await import(PDFJS_MODULE_URL);
+      pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+
+      const pdf = await pdfjsLib.getDocument({ url }).promise;
+      if (destroyed) return;
+
+      wrap.innerHTML = '';
+
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const availW = Math.max(280, wrap.clientWidth - 24);
+
+      for (let i = 1; i <= pdf.numPages; i++){
+        if (destroyed) return;
+        const page = await pdf.getPage(i);
+
+        const baseVp = page.getViewport({ scale: 1 });
+        const cssScale = Math.min(1, availW / baseVp.width);
+        const cssVp = page.getViewport({ scale: cssScale });
+
+        const canvas = document.createElement('canvas');
+        canvas.className = 'pdfjs-page';
+        canvas.style.width  = Math.floor(cssVp.width) + 'px';
+        canvas.style.height = Math.floor(cssVp.height) + 'px';
+        canvas.width  = Math.floor(cssVp.width  * dpr);
+        canvas.height = Math.floor(cssVp.height * dpr);
+
+        const ctx = canvas.getContext('2d');
+        await page.render({
+          canvasContext: ctx,
+          viewport: page.getViewport({ scale: cssScale * dpr }),
+        }).promise;
+
+        if (destroyed) return;
+        wrap.appendChild(canvas);
+      }
+
+      const tip = document.createElement('div');
+      tip.className = 'pdfjs-pages';
+      tip.textContent = '共 ' + pdf.numPages + ' 页';
+      wrap.appendChild(tip);
+    } catch (e){
+      if (destroyed) return;
+      wrap.innerHTML = '';
+      showPreviewFallback(container, file,
+        'PDF 加载失败：' + (e && e.message ? e.message : '未知错误'));
+    }
+  })();
+}
+/* ---------------- docx-preview 前端渲染 ---------------- */
+
+async function renderDocxWithPreview(file, body, modal){
+  const wrap = document.createElement('div');
+  wrap.className = 'preview-docx';
+  wrap.innerHTML = '<div class="pdfjs-loading">正在解析文档…</div>';
+  body.appendChild(wrap);
+
+  let aborted = false;
+  previewCleanupFns.push(() => { aborted = true; });
+
+  // 检查库是否加载
+  if(!window.docx || typeof window.docx.renderAsync !== 'function'){
+    wrap.remove();
+    // 库没加载 → 直接回退到服务端
+    fallbackOoxmlToServer(file, body, modal);
+    return;
+  }
+
+  try {
+    const res = await fetch(
+      '/preview/' + encodeURIComponent(file.name),
+      {cache: 'no-store'}
+    );
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    if(aborted) return;
+
+    wrap.innerHTML = '';
+
+    await window.docx.renderAsync(blob, wrap, null, {
+      className: 'docx-viewer',
+      inWrapper: true,
+      breakPages: true,
+      renderHeaders: true,
+      renderFooters: true,
+      renderFootnotes: true,
+      renderEndnotes: true,
+      ignoreWidth: false,
+      ignoreHeight: false,
+      ignoreFonts: false,
+      ignoreLastRenderedPageBreak: true,
+      experimental: false,
+      useBase64URL: false,
+      debug: false,
+    });
+  } catch(e){
+    if(aborted) return;
+    // 渲染失败 → 回退到服务端
+    wrap.remove();
+    console.warn('docx-preview 失败，回退到服务端：', e);
+    fallbackOoxmlToServer(file, body, modal);
+  }
+}
+
+/* ---------------- 服务端兜底（xlsx / pptx / docx 回退共用） ---------------- */
+
+function fallbackOoxmlToServer(file, body, modal){
+  const wrap = document.createElement('div');
+  wrap.className = 'preview-ooxml';
+  wrap.innerHTML = '<div class="pdfjs-loading">正在解析文档…</div>';
+  body.appendChild(wrap);
+
+  let aborted = false;
+  previewCleanupFns.push(() => { aborted = true; });
+
+  fetch('/api/ooxml?name=' + encodeURIComponent(file.name),
+        {cache: 'no-store'})
+    .then(r => r.json().then(j => ({ok: r.ok, status: r.status, data: j})))
+    .then(({ok, status, data}) => {
+      if(aborted) return;
+      if(!ok || !data || data.error){
+        wrap.remove();
+        showPreviewFallback(body, file,
+          (data && data.error) || ('HTTP ' + status));
+        return;
+      }
+      if(data.mode === 'pdf' && data.url){
+        modal.classList.remove('kind-ooxml');
+        modal.classList.add('kind-pdf');
+        body.innerHTML = '';
+        renderPdfInto(body, data.url, file);
+      } else if(data.mode === 'html' && data.html){
+        wrap.innerHTML = data.html;
+      } else {
+        wrap.remove();
+        showPreviewFallback(body, file, '无法解析文档');
+      }
+    })
+    .catch(e => {
+      if(aborted) return;
+      wrap.remove();
+      showPreviewFallback(body, file,
+        '加载失败：' + (e.message || '未知错误'));
+    });
+}
+
+/* ---------------- 打开预览 ---------------- */
 
 function openPreview(file){
   closePreview();
@@ -1885,75 +2072,16 @@ function openPreview(file){
     body.appendChild(wrap);
     previewCleanupFns.push(() => { try{ a.pause(); a.src = ''; }catch(e){} });
   } else if(kind === 'pdf'){
-    const wrap = document.createElement('div');
-    wrap.className = 'preview-pdfjs';
-    body.appendChild(wrap);
-
-    let destroyed = false;
-    previewCleanupFns.push(() => { destroyed = true; });
-
-    const loading = document.createElement('div');
-    loading.className = 'pdfjs-loading';
-    loading.textContent = '正在加载 PDF…';
-    wrap.appendChild(loading);
-
-    (async () => {
-        try {
-            const pdfjsLib = await import(PDFJS_MODULE_URL);
-            pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
-
-            const pdf = await pdfjsLib.getDocument({ url: previewUrl }).promise;
-            if (destroyed) return;
-
-            wrap.innerHTML = '';
-
-            const dpr = Math.min(window.devicePixelRatio || 1, 2);
-            const availW = Math.max(280, wrap.clientWidth - 24);
-
-            for (let i = 1; i <= pdf.numPages; i++){
-                if (destroyed) return;
-                const page = await pdf.getPage(i);
-
-                const baseVp = page.getViewport({ scale: 1 });
-                const cssScale = Math.min(1, availW / baseVp.width);
-                const cssVp = page.getViewport({ scale: cssScale });
-
-                const canvas = document.createElement('canvas');
-                canvas.className = 'pdfjs-page';
-                canvas.style.width  = Math.floor(cssVp.width) + 'px';
-                canvas.style.height = Math.floor(cssVp.height) + 'px';
-                canvas.width  = Math.floor(cssVp.width  * dpr);
-                canvas.height = Math.floor(cssVp.height * dpr);
-
-                const ctx = canvas.getContext('2d');
-                await page.render({
-                    canvasContext: ctx,
-                    viewport: page.getViewport({ scale: cssScale * dpr }),
-                }).promise;
-
-                if (destroyed) return;
-                wrap.appendChild(canvas);
-            }
-
-            const tip = document.createElement('div');
-            tip.className = 'pdfjs-pages';
-            tip.textContent = '共 ' + pdf.numPages + ' 页';
-            wrap.appendChild(tip);
-        } catch (e){
-            if (destroyed) return;
-            wrap.innerHTML = '';
-            const err = document.createElement('div');
-            err.className = 'preview-fallback';
-            err.innerHTML =
-                '<div class="preview-fallback-icon">' +
-                '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
-                '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>' +
-                '<polyline points="14 2 14 8 20 8"/></svg></div>' +
-                '<div class="preview-fallback-text">PDF 加载失败：' +
-                (e && e.message ? e.message : '未知错误') + '</div>';
-            wrap.appendChild(err);
-        }
-    })();
+    renderPdfInto(body, previewUrl, file);
+  } else if(kind === 'ooxml'){
+    const ext = extOf(file.name);
+    if(PREVIEW_DOCX_EXT.has(ext)){
+      // docx 家族：前端 docx-preview 优先
+      renderDocxWithPreview(file, body, modal);
+    } else {
+      // 其他 Office 格式：走服务端（LibreOffice → PDF）
+      fallbackOoxmlToServer(file, body, modal);
+    }
   } else if(kind === 'text'){
     if(file.size > MAX_TEXT_PREVIEW){
       showPreviewFallback(body, file,

@@ -1340,3 +1340,185 @@ h1{
   .pager-btn{width:36px;height:36px;}
   .pager-info{font-size:13.5px;}
 }
+/* =====================================================================
+   OOXML 预览（docx / xlsx / pptx）
+   ===================================================================== */
+.preview-modal.kind-ooxml .preview-body{
+  padding:16px;
+  align-items:flex-start;
+  justify-content:center;
+  overflow:auto;
+}
+
+.preview-ooxml{
+  width:100%;
+  max-width:900px;
+  margin:0 auto;
+  padding:22px 26px;
+  background:#ffffff;
+  color:#1f2937;
+  border-radius:var(--radius-sm);
+  box-shadow:0 2px 12px rgba(0,0,0,.08);
+  font-size:13.5px;
+  line-height:1.65;
+  word-break:break-word;
+  overflow-wrap:anywhere;
+}
+
+.preview-ooxml p{margin:0 0 10px;}
+.preview-ooxml p:last-child{margin-bottom:0;}
+
+.preview-ooxml h3{
+  font-size:13.5px;
+  font-weight:600;
+  margin:16px 0 10px;
+  padding:6px 10px;
+  background:#f3f4f6;
+  color:#374151;
+  border-radius:6px;
+}
+.preview-ooxml h3:first-child{margin-top:0;}
+
+.preview-ooxml .ooxml-sheet{margin-bottom:22px;}
+.preview-ooxml .ooxml-sheet:last-child{margin-bottom:0;}
+
+.preview-ooxml .ooxml-table{
+  border-collapse:collapse;
+  width:100%;
+  font-size:12.5px;
+  margin:0 0 12px;
+  table-layout:auto;
+}
+.preview-ooxml .ooxml-table td{
+  border:1px solid #e5e7eb;
+  padding:5px 9px;
+  vertical-align:top;
+  word-break:break-word;
+  max-width:400px;
+  min-width:40px;
+}
+.preview-ooxml .ooxml-table tr:nth-child(even) td{
+  background:#fafafa;
+}
+
+.preview-ooxml .ooxml-slide{
+  margin-bottom:16px;
+  padding:14px 16px;
+  background:#f9fafb;
+  border:1px solid #f3f4f6;
+  border-radius:10px;
+}
+.preview-ooxml .ooxml-slide:last-child{margin-bottom:0;}
+.preview-ooxml .ooxml-slide pre{
+  margin:0;
+  white-space:pre-wrap;
+  font-family:inherit;
+  font-size:13.5px;
+  line-height:1.65;
+  color:#1f2937;
+}
+
+@media (prefers-color-scheme: dark){
+  .preview-ooxml{
+    background:#1a1f2a;
+    color:#e5e7eb;
+    box-shadow:none;
+    border:1px solid var(--border);
+  }
+  .preview-ooxml h3{
+    background:#232a36;
+    color:#cbd5e1;
+  }
+  .preview-ooxml .ooxml-table td{
+    border-color:#2a3140;
+    color:#d1d5db;
+  }
+  .preview-ooxml .ooxml-table tr:nth-child(even) td{
+    background:#1e2532;
+  }
+  .preview-ooxml .ooxml-slide{
+    background:#1e2532;
+    border-color:#2a3140;
+  }
+  .preview-ooxml .ooxml-slide pre{color:#d1d5db;}
+}
+
+@media (max-width:900px), (pointer:coarse){
+  .preview-ooxml{
+    padding:16px 16px;
+    border-radius:0;
+    max-width:100%;
+    font-size:13px;
+  }
+  .preview-ooxml .ooxml-table td{
+    padding:4px 8px;
+    font-size:12px;
+    max-width:220px;
+  }
+}
+/* =====================================================================
+   docx-preview 前端渲染样式
+   ===================================================================== */
+
+.preview-modal.kind-ooxml .preview-body{
+  padding:16px;
+  align-items:flex-start;
+  justify-content:center;
+  overflow:auto;
+}
+
+.preview-docx{
+  width:100%;
+  max-width:900px;
+  margin:0 auto;
+  padding:0;
+}
+
+/* docx-preview 自动生成的 wrapper */
+.preview-docx .docx-wrapper{
+  background:transparent !important;
+  padding:0 !important;
+}
+
+/* 每一页（section.docx）*/
+.preview-docx .docx-wrapper > section.docx{
+  background:#ffffff !important;
+  box-shadow:0 2px 12px rgba(0,0,0,.10);
+  margin:0 auto 18px !important;
+  border-radius:2px;
+  color:#1f2937;
+}
+
+.preview-docx .docx-wrapper > section.docx:last-child{
+  margin-bottom:0 !important;
+}
+
+/* 表格边框兼容（某些文档默认无边框） */
+.preview-docx table.docx-table,
+.preview-docx table{
+  border-collapse:collapse;
+}
+.preview-docx table td,
+.preview-docx table th{
+  border:1px solid #d1d5db;
+  padding:4px 8px;
+}
+
+/* 深色模式：保持白底（文档预览必须白底才可读） */
+@media (prefers-color-scheme: dark){
+  .preview-docx .docx-wrapper > section.docx{
+    background:#ffffff !important;
+    color:#1f2937;
+  }
+}
+
+/* 小屏适配 */
+@media (max-width:900px), (pointer:coarse){
+  .preview-docx{
+    max-width:100%;
+  }
+  .preview-docx .docx-wrapper > section.docx{
+    margin-bottom:12px !important;
+    border-radius:0;
+  }
+}

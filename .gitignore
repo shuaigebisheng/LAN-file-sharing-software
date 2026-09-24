@@ -10,3 +10,4 @@ bin/
 shared/
 __pycache__/
 .data/
+dist/
