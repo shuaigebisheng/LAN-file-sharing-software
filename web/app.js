@@ -108,6 +108,90 @@ function toast(msg){
 }
 
 /* =========================================================
+   微信下载引导
+   微信内置浏览器对文件下载支持极差：
+     - 安卓 X5 内核会拦截 attachment 下载，弹"在浏览器打开"
+     - iOS WKWebView 自实现的下载器无断点续传，大文件易失败
+   策略：微信环境下拦截所有下载点击，弹出"复制链接 / 在浏览器打开"引导
+   ========================================================= */
+
+function isWechat(){
+  return /MicroMessenger/i.test(navigator.userAgent);
+}
+
+function downloadUrl(name){
+  return '/download/' + encodeURIComponent(name);
+}
+
+function handleDownloadClick(e, name){
+  if(!isWechat()) return;   // 非微信：正常走 a 标签下载
+  e.preventDefault();
+  showWechatDownloadGuide(name);
+}
+
+function showWechatDownloadGuide(name){
+  const url = location.origin + '/dl?name=' + encodeURIComponent(name);
+
+  // 避免重复弹窗
+  const old = document.getElementById('wxDownloadGuide');
+  if(old) old.remove();
+
+  const mask = document.createElement('div');
+  mask.id = 'wxDownloadGuide';
+  mask.className = 'modal-mask';
+  mask.innerHTML =
+    '<div class="modal" style="max-width:420px;text-align:center;">' +
+      '<h3 style="margin-bottom:8px;">微信内无法直接下载</h3>' +
+      '<p style="color:var(--dim);font-size:13.5px;margin:0 0 16px;line-height:1.6;">' +
+        '请点击右上角 <b>···</b> → <b>在浏览器打开</b>，<br>' +
+        '或复制下方链接到浏览器访问：' +
+      '</p>' +
+      '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
+        '<input id="wxDlUrl" readonly ' +
+               'style="flex:1;min-width:0;padding:9px 10px;' +
+                      'border:1px solid var(--border-2);border-radius:8px;' +
+                      'font-size:12.5px;background:var(--bg-sub);' +
+                      'color:var(--text);box-sizing:border-box;">' +
+        '<button class="mini-btn primary" id="wxDlCopy" ' +
+                'style="flex:0 0 auto;">复制</button>' +
+      '</div>' +
+      '<div class="modal-actions" style="justify-content:center;">' +
+        '<button data-act="close">关闭</button>' +
+      '</div>' +
+    '</div>';
+
+  document.body.appendChild(mask);
+
+  const input = mask.querySelector('#wxDlUrl');
+  input.value = url;
+
+  mask.querySelector('#wxDlCopy').onclick = async () => {
+    let ok = false;
+    try{
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        await navigator.clipboard.writeText(url);
+        ok = true;
+      }
+    }catch(e){}
+    if(!ok){
+      try{
+        input.removeAttribute('readonly');
+        input.select();
+        input.setSelectionRange(0, 99999);
+        ok = document.execCommand('copy');
+        input.setAttribute('readonly', '');
+      }catch(e){}
+    }
+    toast(ok ? '已复制，请粘贴到浏览器打开' : '复制失败，请长按链接手动复制');
+  };
+
+  mask.querySelector('[data-act="close"]').onclick = () => mask.remove();
+  mask.addEventListener('click', e => {
+    if(e.target === mask) mask.remove();
+  });
+}
+
+/* =========================================================
    SVG 图标
    ========================================================= */
 
@@ -1457,6 +1541,13 @@ async function downloadSelectedAsZip(){
   const names = Array.from(selectedFiles);
   if(!names.length) return;
 
+  // 微信内置浏览器无法可靠处理 blob 下载，直接走引导
+  if(isWechat()){
+    const fake = '（已选 ' + names.length + ' 个文件）.zip';
+    toast('微信内无法打包下载，请使用浏览器打开');
+    return;
+  }
+
   const btn = fileZipBtn;
   const origHTML = btn.innerHTML;
   btn.disabled = true;
@@ -1734,10 +1825,11 @@ function buildFileEl(f){
 
   const a = document.createElement('a');
   a.className = 'icon-btn primary';
-  a.href = '/download/' + encodeURIComponent(f.name);
+  a.href = downloadUrl(f.name);
   a.setAttribute('download', f.name);
   a.title = '下载';
   a.innerHTML = iconSvg('download');
+  a.addEventListener('click', e => handleDownloadClick(e, f.name));
   actions.appendChild(a);
 
   if(f.is_mine){
@@ -2024,9 +2116,10 @@ function openPreview(file){
 
   const dl = document.createElement('a');
   dl.className = 'preview-btn primary';
-  dl.href = '/download/' + encodeURIComponent(file.name);
+  dl.href = downloadUrl(file.name);
   dl.setAttribute('download', file.name);
   dl.innerHTML = iconSvg('download') + '<span>下载</span>';
+  dl.addEventListener('click', e => handleDownloadClick(e, file.name));
 
   const closeBtn = document.createElement('button');
   closeBtn.className = 'preview-btn';
@@ -2159,9 +2252,10 @@ function showPreviewFallback(body, file, msg){
   text.textContent = msg;
   const btn = document.createElement('a');
   btn.className = 'preview-btn primary';
-  btn.href = '/download/' + encodeURIComponent(file.name);
+  btn.href = downloadUrl(file.name);
   btn.setAttribute('download', file.name);
   btn.innerHTML = iconSvg('download') + '<span>下载文件</span>';
+  btn.addEventListener('click', e => handleDownloadClick(e, file.name));
   wrap.append(ic, text, btn);
   body.appendChild(wrap);
 }

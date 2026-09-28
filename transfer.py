@@ -1242,6 +1242,28 @@ def _new_transfer(direction, name, size, offset, client,
                     old["client_key"] = client_key_val
                     old["cid"] = cid
                     return old_tid
+        else:
+            # 下载：同一客户端 + 同一文件 → 复用现有记录
+            # 浏览器会用多线程 / 多 Range 请求下载同一文件，
+            # 若每次请求都新建 transfer，会出现多条进度条，且失败分片会显示暂停
+            for old_tid, old in list(TRANSFERS.items()):
+                if (old["dir"] == "down"
+                        and old["name"] == name
+                        and old["size"] == size
+                        and old.get("client_key") == client_key_val
+                        and not (old["done"] and old["ok"])):
+                    old["received"] = offset
+                    old["t0"] = now
+                    old["last_t"] = now
+                    old["last_b"] = offset
+                    old["speed"] = 0.0
+                    old["done"] = False
+                    old["ok"] = False
+                    old["paused"] = False
+                    old["error"] = None
+                    old["client"] = client
+                    return old_tid
+
         tid = next(_TID)
         TRANSFERS[tid] = {
             "id": tid, "dir": direction, "name": name, "size": size,
@@ -1260,6 +1282,9 @@ def _update_transfer(tid, received):
         t = TRANSFERS.get(tid)
         if not t:
             return
+        # 已成功完成 → 锁定状态（多请求复用同一 tid 时，避免其他分片回写覆盖）
+        if t.get("done") and t.get("ok"):
+            return
         t["received"] = received
         dt = now - t["last_t"]
         if dt >= 0.5:
@@ -1276,6 +1301,9 @@ def _pause_transfer(tid, reason=None):
     with TRANSFERS_LOCK:
         t = TRANSFERS.get(tid)
         if not t:
+            return
+        # 已成功完成 → 不再被覆盖为暂停（多请求复用同一 tid 时的保护）
+        if t.get("done") and t.get("ok"):
             return
         t["done"] = False
         t["ok"] = False
@@ -1377,6 +1405,12 @@ class Handler(BaseHTTPRequestHandler):
         if cid:
             return cid
         return client_key(self.client_address[0])
+
+    def _is_wechat(self):
+        """微信内置浏览器下载行为不可靠（安卓 X5 拦截、iOS 无断点续传），
+        因此对微信 UA 不追踪下载进度，避免服务端出现无意义的进度条。"""
+        ua = (self.headers.get("User-Agent", "") if self.headers else "") or ""
+        return "MicroMessenger" in ua
 
     # ---------- 日志 ----------
 
@@ -1482,6 +1516,8 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path.startswith("/static/"):
             self._serve_static(path)
+        elif path == "/dl":
+            self._serve_download_page(qs)
 
         elif path == "/api/qr.svg":
             host = (qs.get("host") or [""])[0].strip()
@@ -1996,9 +2032,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "HEAD":
             return
 
+        # 微信内置浏览器下载行为不可靠（安卓 X5 拦截、iOS 无断点续传），
+        # 对微信 UA 不追踪进度，避免出现无意义的进度条
         tid = None
-        if not inline:
-            tid = _new_transfer("down", safe, size, start, self._me_name())
+        if not inline and not self._is_wechat():
+            tid = _new_transfer("down", safe, size, start, self._me_name(),
+                                client_key_val=me)
 
         sent = 0
         try:
@@ -2129,6 +2168,81 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, "web/qr.html 未找到")
             return
         html = template.replace("{{QR_SVG}}", svg).replace("{{URL}}", url)
+        self._send(200, html, "text/html; charset=utf-8")
+
+    def _serve_download_page(self, qs):
+        """下载中间页：微信跳浏览器下载时，给用户一个明确的进度提示界面。"""
+        name = os.path.basename((qs.get("name") or [""])[0].strip())
+        if not name:
+            self._send(400, "缺少文件名")
+            return
+
+        full = os.path.join(SHARED_DIR, name)
+        if not os.path.isfile(full):
+            self._send(404, "文件不存在")
+            return
+
+        me = self._me()
+        meta = _load_meta()
+        if not can_access(name, me, meta):
+            self._send(403, "无访问权限")
+            return
+
+        try:
+            st = os.stat(full)
+            size = st.st_size
+            mtime = st.st_mtime
+        except OSError:
+            self._send(500, "文件读取失败")
+            return
+
+        template = read_web_file("download.html")
+        if template is None:
+            self._send(500, "web/download.html 未找到")
+            return
+
+        # 图片文件优先展示缩略图。
+        # 如果缩略图尚未生成且 Pillow 可用，就在本次请求内同步生成一次
+        #（一般 <1s），避免前端反复重试看不到图。
+        head_block = None
+        if _is_image_file(name):
+            thumb_path = _thumb_path(name)
+            if not os.path.isfile(thumb_path) and _HAS_PIL:
+                with _THUMB_FAILED_LOCK:
+                    failed = name in _THUMB_FAILED
+                if not failed:
+                    try:
+                        _generate_thumbnail_sync(full, name)
+                    except Exception:
+                        pass
+
+            if os.path.isfile(thumb_path):
+                thumb_url = "/thumb/" + urllib.parse.quote(name)
+                head_block = (
+                    '<img class="thumb" id="thumbImg" src="'
+                    + thumb_url + '" alt="">'
+                )
+
+        if head_block is None:
+            head_block = (
+                '<div class="icon">'
+                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+                'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+                '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+                '<polyline points="7 10 12 15 17 10"/>'
+                '<line x1="12" y1="15" x2="12" y2="3"/>'
+                '</svg></div>'
+            )
+
+        html = (
+            template
+            .replace("{{FILENAME}}", _html.escape(name))
+            .replace("{{FILENAME_ATTR}}", _html.escape(name, quote=True))
+            .replace("{{SIZE}}", fmt_bytes(size))
+            .replace("{{MTIME}}", time.strftime(
+                "%Y-%m-%d %H:%M", time.localtime(mtime)))
+            .replace("{{HEAD_BLOCK}}", head_block)
+        )
         self._send(200, html, "text/html; charset=utf-8")
 
     # ---------------- 上传状态 ----------------
@@ -2820,7 +2934,7 @@ class App:
             return 2
 
         items.sort(key=lambda x: (sort_key(x), x["t0"]))
-        items = items[:6]
+        items = items[:8]
 
         current_ids = {t["id"] for t in items}
         for tid in list(self._transfer_rows.keys()):
@@ -2860,11 +2974,17 @@ class App:
                     pass
                 self._transfer_empty = None
 
+    def _remove_transfer_row(self, tid):
+        """从面板移除指定传输记录（不中断底层连接）。"""
+        with TRANSFERS_LOCK:
+            TRANSFERS.pop(tid, None)
+
     def _create_transfer_row(self, tid, t):
         row = ttk.Frame(self.transfers_frame)
         row.columnconfigure(0, weight=0, minsize=180)
         row.columnconfigure(1, weight=1)
         row.columnconfigure(2, weight=0, minsize=190)
+        row.columnconfigure(3, weight=0)
 
         arrow = "⬆" if t["dir"] == "up" else "⬇"
         name = t["name"]
@@ -2881,6 +3001,20 @@ class App:
         slbl = ttk.Label(row, text="", anchor="e",
                          foreground="#374151", font=("", 9))
         slbl.grid(row=0, column=2, sticky="e")
+
+        # 手动清理按钮：移除该条进度记录（不中断底层连接）
+        close_btn = ttk.Label(row, text="✕", cursor="hand2",
+                              foreground="#9ca3af", font=("", 10),
+                              padding=(4, 0))
+        close_btn.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        close_btn.bind("<Button-1>",
+                       lambda e, _tid=tid: self._remove_transfer_row(_tid))
+        close_btn.bind(
+            "<Enter>",
+            lambda e, w=close_btn: w.configure(foreground="#ef4444"))
+        close_btn.bind(
+            "<Leave>",
+            lambda e, w=close_btn: w.configure(foreground="#9ca3af"))
 
         self._transfer_rows[tid] = {
             "frame": row, "name": name_lbl,

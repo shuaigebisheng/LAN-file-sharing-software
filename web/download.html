@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>下载 · {{FILENAME}}</title>
+<style>
+:root{
+  --bg:#f5f7fb;--card:#fff;--text:#0f172a;--dim:#64748b;
+  --accent:#4f6bff;--accent-hover:#3d55e8;--border:#e6e9f0;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0a0d14;--card:#12161f;--text:#e8ecf3;--dim:#8a93a5;
+    --accent:#6f86ff;--accent-hover:#8ea0ff;--border:#1e2532;
+  }
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+              "Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  background:var(--bg);color:var(--text);
+  min-height:100vh;min-height:100dvh;
+  display:grid;place-items:center;padding:20px;
+  -webkit-font-smoothing:antialiased;
+}
+.card{
+  background:var(--card);border-radius:18px;
+  padding:34px 28px;max-width:460px;width:100%;
+  box-shadow:0 4px 24px rgba(0,0,0,.08);
+  text-align:center;
+}
+.head{display:flex;justify-content:center;margin-bottom:18px;}
+.icon{
+  width:64px;height:64px;
+  border-radius:16px;background:rgba(79,107,255,.1);
+  color:var(--accent);display:grid;place-items:center;
+}
+.icon svg{width:30px;height:30px;}
+.thumb{
+  width:160px;height:160px;
+  border-radius:14px;object-fit:cover;
+  background:var(--bg);display:block;
+  box-shadow:0 2px 12px rgba(0,0,0,.08);
+}
+h1{
+  font-size:18px;margin:0 0 10px;font-weight:700;
+  letter-spacing:-.01em;
+}
+.filename{
+  font-size:14px;color:var(--text);font-weight:600;
+  margin:0 0 6px;word-break:break-all;line-height:1.45;
+}
+.meta{
+  font-size:12.5px;color:var(--dim);margin:0 0 22px;
+  font-variant-numeric:tabular-nums;
+}
+.status{
+  font-size:13px;color:var(--dim);
+  margin:0 0 22px;min-height:20px;line-height:1.55;
+}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  gap:8px;padding:11px 26px;border-radius:10px;
+  background:var(--accent);color:#fff;
+  font-size:14px;font-weight:600;font-family:inherit;
+  text-decoration:none;cursor:pointer;border:none;
+  transition:background .15s,transform .12s;
+}
+.btn:hover{background:var(--accent-hover);}
+.btn:active{transform:scale(.97);}
+.btn svg{width:16px;height:16px;flex:0 0 auto;}
+.btn-secondary{
+  background:transparent;color:var(--dim);
+  border:1px solid var(--border);font-weight:500;
+  font-size:12.5px;padding:8px 18px;margin-top:14px;
+}
+.btn-secondary:hover{background:var(--bg);color:var(--text);}
+</style>
+</head>
+<body>
+<div class="card" id="pageCard" data-filename="{{FILENAME_ATTR}}">
+  <div class="head">{{HEAD_BLOCK}}</div>
+
+  <h1>文件下载</h1>
+  <div class="filename">{{FILENAME}}</div>
+  <div class="meta">{{SIZE}} · {{MTIME}}</div>
+  <div class="status" id="status">正在准备下载…</div>
+
+  <button class="btn" id="dlBtn" type="button">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+    <span id="btnText">开始下载</span>
+  </button>
+
+  <div>
+    <a class="btn btn-secondary" href="/">返回文件列表</a>
+  </div>
+</div>
+
+<script>
+(function(){
+  var card = document.getElementById('pageCard');
+  var name = card ? (card.dataset.filename || '') : '';
+  var url  = '/download/' + encodeURIComponent(name);
+
+  var dl     = document.getElementById('dlBtn');
+  var btnTxt = document.getElementById('btnText');
+  var status = document.getElementById('status');
+
+  function doDownload(){
+    if(!name) return;
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  function markStarted(){
+    status.textContent = '下载已开始，请查看浏览器的下载列表。';
+    btnTxt.textContent = '重新下载';
+  }
+
+  // 每次点击都触发一次下载
+  dl.addEventListener('click', function(){
+    doDownload();
+    markStarted();
+  });
+
+  // 页面加载后自动尝试一次（从微信跳浏览器时通常已满足 user gesture）
+  setTimeout(function(){
+    try{
+      doDownload();
+      markStarted();
+    }catch(e){
+      status.textContent = '请点击下方按钮开始下载';
+    }
+  }, 300);
+})();
+</script>
+</body>
+</html>
