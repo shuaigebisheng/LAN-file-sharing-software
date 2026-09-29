@@ -29,6 +29,50 @@ function getClientId(){
 const CLIENT_ID = getClientId();
 
 /* =========================================================
+   设备名
+   ========================================================= */
+
+const DEVICE_NAME_KEY = 'landrop_device_name';
+
+function loadDeviceName(){
+  try{ return localStorage.getItem(DEVICE_NAME_KEY) || ''; }catch(e){ return ''; }
+}
+
+function saveDeviceName(name){
+  try{
+    if(name) localStorage.setItem(DEVICE_NAME_KEY, name);
+    else localStorage.removeItem(DEVICE_NAME_KEY);
+  }catch(e){}
+}
+
+/* 给所有 fetch 自动带上 X-Device-Name 头 */
+(function(){
+  const _origFetch = window.fetch;
+  if(typeof _origFetch !== 'function') return;
+  window.fetch = function(input, init){
+    try{
+      const name = loadDeviceName();
+      if(name){
+        init = init || {};
+        let headers;
+        if(init.headers instanceof Headers){
+          headers = init.headers;
+        } else if(Array.isArray(init.headers)){
+          headers = new Headers(init.headers);
+        } else {
+          headers = new Headers(init.headers || {});
+        }
+        if(!headers.has('X-Device-Name')){
+          try{ headers.set('X-Device-Name', encodeURIComponent(name)); }catch(e){}
+        }
+        init.headers = headers;
+      }
+    }catch(e){}
+    return _origFetch.call(this, input, init);
+  };
+})();
+
+/* =========================================================
    工具函数
    ========================================================= */
 
@@ -933,6 +977,12 @@ function uploadSlice(item){
 
     xhr.open('POST', url);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    try{
+      const devName = loadDeviceName();
+      if(devName){
+        xhr.setRequestHeader('X-Device-Name', encodeURIComponent(devName));
+      }
+    }catch(e){}
 
     let lastT = Date.now(), lastB = startOffset;
 
@@ -2261,6 +2311,102 @@ function showPreviewFallback(body, file, msg){
 }
 
 /* =========================================================
+   扫码连接
+   ========================================================= */
+
+let _qrModalEl = null;
+
+function _onQrKey(e){
+  if(e.key === 'Escape'){ e.preventDefault(); closeQrModal(); }
+}
+
+function closeQrModal(){
+  document.removeEventListener('keydown', _onQrKey, true);
+  if(_qrModalEl){
+    try{ _qrModalEl.remove(); }catch(e){}
+    _qrModalEl = null;
+  }
+}
+
+async function copyText(text){
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  }catch(e){}
+  try{
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-9999px;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  }catch(e){ return false; }
+}
+
+async function openQrModal(){
+  closeQrModal();
+
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.innerHTML =
+    '<div class="modal qr-modal">' +
+      '<h3>扫码连接</h3>' +
+      '<p class="qr-modal-hint">用相机或浏览器扫描，即可打开同一页面</p>' +
+      '<div class="qr-modal-box" id="qrModalBox">' +
+        '<div class="qr-modal-loading">生成中…</div>' +
+      '</div>' +
+      '<div class="qr-modal-url" id="qrModalUrl"></div>' +
+      '<div class="modal-actions" style="justify-content:center;">' +
+        '<button type="button" data-act="copy">复制链接</button>' +
+        '<button type="button" class="primary" data-act="close">关闭</button>' +
+      '</div>' +
+    '</div>';
+
+  const box   = mask.querySelector('#qrModalBox');
+  const urlEl = mask.querySelector('#qrModalUrl');
+  let qrUrl = '';
+
+  mask.addEventListener('click', e => {
+    if(e.target === mask){ closeQrModal(); return; }
+    const btn = e.target.closest('[data-act]');
+    if(!btn) return;
+    const act = btn.dataset.act;
+    if(act === 'close') closeQrModal();
+    else if(act === 'copy'){
+      if(!qrUrl){ toast('链接尚未生成'); return; }
+      copyText(qrUrl).then(ok =>
+        toast(ok ? '已复制，去粘贴给其他设备' : '复制失败，请长按选择'));
+    }
+  });
+
+  document.body.appendChild(mask);
+  _qrModalEl = mask;
+  document.addEventListener('keydown', _onQrKey, true);
+
+  try{
+    const r = await fetch('/api/qr.json', {cache: 'no-store'});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    if(!_qrModalEl) return;               // 用户已关闭
+    qrUrl = j.url || '';
+    urlEl.textContent = qrUrl;
+    box.innerHTML = j.svg
+      ? j.svg
+      : '<div class="qr-modal-loading">二维码生成失败</div>';
+  }catch(e){
+    if(!_qrModalEl) return;
+    box.innerHTML = '<div class="qr-modal-loading">二维码生成失败</div>';
+    urlEl.textContent = e.message || '加载失败';
+  }
+}
+
+$('qrOpenBtn').addEventListener('click', openQrModal);
+
+/* =========================================================
    在线设备 & 发送目标
    ========================================================= */
 
@@ -2335,11 +2481,18 @@ function renderTargets(){
 
   updateDropzoneState();
 
-  const meLabel = $('meLabel');
+  const chipName = $('deviceChipName');
+  const chipEl   = $('deviceChip');
   const self = clients.find(c => c.is_self);
-  meLabel.textContent = self
-    ? '当前设备：' + self.name
-    : '局域网互传 · 同一网络，直接传文件';
+  const label = self ? self.name : '识别中…';
+  if(chipName && chipName.textContent !== label){
+    chipName.textContent = label;
+  }
+  if(chipEl){
+    chipEl.title = self
+      ? '点击修改设备名：' + self.name
+      : '点击修改设备名';
+  }
 
   refreshTargetUI();
 }
@@ -2463,6 +2616,66 @@ async function savePermission(file, toClients){
 }
 
 /* =========================================================
+   修改设备名
+   ========================================================= */
+
+function openDeviceNameModal(){
+  const current = loadDeviceName() || '';
+
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.innerHTML =
+    '<div class="modal" style="max-width:380px;">' +
+      '<h3>设置设备名</h3>' +
+      '<div class="modal-file" style="margin-bottom:14px;">' +
+        '这个名字其他设备也能看到，方便对方辨认你。留空则使用默认名。' +
+      '</div>' +
+      '<input type="text" class="dev-name-input" id="devNameInput" ' +
+             'maxlength="24" autocomplete="off" ' +
+             'placeholder="例如：张三的手机">' +
+      '<div class="modal-actions" style="margin-top:16px;">' +
+        '<button type="button" data-act="cancel">取消</button>' +
+        '<button type="button" class="primary" data-act="save">保存</button>' +
+      '</div>' +
+    '</div>';
+
+  document.body.appendChild(mask);
+  const input = mask.querySelector('#devNameInput');
+  input.value = current;
+
+  const close = () => {
+    try{ mask.remove(); }catch(e){}
+  };
+
+  mask.addEventListener('click', e => {
+    if(e.target === mask){ close(); return; }
+    const btn = e.target.closest('[data-act]');
+    if(!btn) return;
+    const act = btn.dataset.act;
+    if(act === 'cancel'){ close(); }
+    else if(act === 'save'){
+      const v = (input.value || '').trim();
+      saveDeviceName(v);
+      close();
+      refreshClients();
+      toast(v ? '设备名已更新' : '已恢复默认设备名');
+    }
+  });
+
+  input.addEventListener('keydown', e => {
+    if(e.key === 'Enter'){
+      e.preventDefault();
+      const btn = mask.querySelector('[data-act="save"]');
+      if(btn) btn.click();
+    }
+  });
+
+  setTimeout(() => {
+    try{ input.focus(); input.select(); }catch(e){}
+  }, 50);
+}
+
+/* =========================================================
    拖拽上传
    ========================================================= */
 
@@ -2518,6 +2731,11 @@ document.addEventListener('drop', e => {
 loadFileFilter();
 restoreQueue();
 refreshClients();
+(function initDeviceNameUI(){
+  const chip = $('deviceChip');
+  if(!chip) return;
+  chip.addEventListener('click', openDeviceNameModal);
+})();
 refreshFiles(true);
 refreshTargetUI();
 refreshFileSortUI();

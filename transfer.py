@@ -849,6 +849,7 @@ def _ensure_office_pdf(name, src_path):
 
         return cached
 
+
 def _cleanup_office_pdf_cache(max_files=200):
     """简单清理：缓存文件数超过上限时删掉最旧的一批。"""
     try:
@@ -901,6 +902,28 @@ def _sanitize_log_text(s):
 
 
 # =====================================================================
+#  回环地址判断（供二维码 host 选择使用）
+# =====================================================================
+
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
+
+
+def _is_loopback_host(host):
+    """判断 Host 头是不是回环/本机地址（这类地址不适合编进二维码）。"""
+    if not host:
+        return True
+    h = host.strip()
+    if h.startswith("["):           # IPv6 形如 [::1]:8000
+        end = h.find("]")
+        if end > 0:
+            h = h[1:end]
+    elif ":" in h:
+        h = h.rsplit(":", 1)[0]
+    h = h.lower()
+    return h in _LOOPBACK_HOSTS or h.startswith("127.")
+
+
+# =====================================================================
 #  User-Agent
 # =====================================================================
 
@@ -945,6 +968,46 @@ def parse_ua(ua):
         return f"{device} · {browser}"
     return device or browser
 
+# =====================================================================
+#  设备名（用于在线设备显示）
+# =====================================================================
+
+_DEVICE_NAME_MAX = 24
+
+
+def _clean_device_name(raw):
+    """清洗用户传来的设备名：去控制字符、截断、去首尾空白。"""
+    if not raw:
+        return ""
+    s = "".join(ch for ch in str(raw) if ch.isprintable() or ch == " ")
+    s = s.strip()
+    if not s:
+        return ""
+    if len(s) > _DEVICE_NAME_MAX:
+        s = s[:_DEVICE_NAME_MAX]
+    return s
+
+
+def _short_ip_suffix(ip):
+    """取 IP 尾号（'…23'）。回环 / 空值返回空字符串。"""
+    if not ip:
+        return ""
+    if ip in ("127.0.0.1", "::1", "localhost"):
+        return ""
+    if ":" in ip:                       # IPv6
+        return ip.rsplit(":", 1)[-1]
+    return ip.rsplit(".", 1)[-1]
+
+
+def _build_default_name(ua, ip):
+    """没设自定义名时的默认显示名：'Android 手机 · …23'。"""
+    base = parse_ua(ua) or ""
+    suffix = _short_ip_suffix(ip)
+    if not suffix:
+        return base
+    if base:
+        return f"{base} · …{suffix}"
+    return f"设备 · …{suffix}"
 
 # =====================================================================
 #  客户端身份（IP 归一化）
@@ -1412,6 +1475,29 @@ class Handler(BaseHTTPRequestHandler):
         ua = (self.headers.get("User-Agent", "") if self.headers else "") or ""
         return "MicroMessenger" in ua
 
+    def _qr_target_host(self, qs=None):
+        """
+        决定二维码里编码的 host:port。
+        优先级：显式 host 参数 > 请求 Host 头（非回环） > 本机局域网 IP。
+        这样从任意设备打开网页时，生成的二维码都是当前可达的地址。
+        """
+        if qs:
+            explicit = (qs.get("host") or [""])[0].strip()
+            if explicit:
+                return explicit
+
+        host = (self.headers.get("Host", "") if self.headers else "") or ""
+        if not _is_loopback_host(host):
+            return host
+
+        try:
+            port = self.server.server_port
+        except Exception:
+            port = PORT
+
+        ips = get_lan_ips()
+        return f"{ips[0]}:{port}" if ips else f"localhost:{port}"
+
     # ---------- 日志 ----------
 
     def log_message(self, fmt, *args):
@@ -1462,7 +1548,20 @@ class Handler(BaseHTTPRequestHandler):
         try:
             ua = self.headers.get("User-Agent", "") if self.headers else ""
             ip = self.client_address[0]
-            touch_client(client_key(ip), ip, parse_ua(ua))
+
+            # 优先使用前端通过 X-Device-Name 传来的自定义名
+            custom = ""
+            if self.headers:
+                raw = self.headers.get("X-Device-Name", "") or ""
+                if raw:
+                    try:
+                        raw = urllib.parse.unquote(raw)
+                    except Exception:
+                        raw = ""
+                    custom = _clean_device_name(raw)
+
+            name = custom if custom else _build_default_name(ua, ip)
+            touch_client(client_key(ip), ip, name)
         except Exception:
             pass
 
@@ -1520,10 +1619,7 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_download_page(qs)
 
         elif path == "/api/qr.svg":
-            host = (qs.get("host") or [""])[0].strip()
-            if not host:
-                ips = get_lan_ips()
-                host = f"{ips[0]}:{PORT}" if ips else f"localhost:{PORT}"
+            host = self._qr_target_host(qs)
             url = f"http://{host}/"
             try:
                 svg = qr_svg(qr_encode(url))
@@ -1532,6 +1628,15 @@ class Handler(BaseHTTPRequestHandler):
                        'viewBox="0 0 100 100"><text x="50" y="55" '
                        'text-anchor="middle" font-size="12">生成失败</text></svg>')
             self._send(200, svg, "image/svg+xml; charset=utf-8")
+
+        elif path == "/api/qr.json":
+            host = self._qr_target_host(qs)
+            url = f"http://{host}/"
+            try:
+                svg = qr_svg(qr_encode(url))
+                self._json({"url": url, "svg": svg})
+            except Exception as e:
+                self._json({"url": url, "svg": "", "error": str(e)}, 500)
 
         elif path == "/qr":
             self._serve_qr_page(qs)
@@ -2153,10 +2258,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------- /qr ----------------
 
     def _serve_qr_page(self, qs):
-        host = self.headers.get("Host", "")
-        if not host or host.startswith("127.") or host.startswith("localhost"):
-            ips = get_lan_ips()
-            host = f"{ips[0]}:{PORT}" if ips else f"localhost:{PORT}"
+        host = self._qr_target_host(qs)
         url = f"http://{host}/"
         try:
             svg = qr_svg(qr_encode(url))
@@ -2845,9 +2947,9 @@ class App:
 
     def _update_header(self):
         p = SHARED_DIR
-        if len(p) > 38:
-            p = "…" + p[-35:]
-        self.info_var.set(f"端口 {self.port}  ·  {p}")
+        if len(p) > 60:
+            p = "…" + p[-57:]
+        self.info_var.set(p)
 
     def _refresh_clients(self):
         clients = get_active_clients()
