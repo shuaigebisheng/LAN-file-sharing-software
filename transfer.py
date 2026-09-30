@@ -117,7 +117,10 @@ PARTIAL_DIR = os.path.join(DATA_DIR, "partial")
 THUMB_DIR   = os.path.join(DATA_DIR, "thumbs")
 OFFICE_PDF_CACHE_DIR = os.path.join(DATA_DIR, "office_pdf_cache")
 PORT  = 8000
-CHUNK = 64 * 1024
+CHUNK = 1024 * 1024        # 1 MB，read/write 回退路径的块大小
+
+# sendfile 每段最多推送的字节数（分段是为了更新进度条）
+_SENDFILE_CHUNK = 8 * 1024 * 1024
 
 THUMB_MAX_SIZE = (240, 240)
 THUMB_QUALITY  = 78
@@ -1283,6 +1286,12 @@ _TID = itertools.count(1)
 
 def _new_transfer(direction, name, size, offset, client,
                   client_key_val="", cid=""):
+    """创建或复用传输记录。
+
+    返回 (tid, req_id)：
+      - 上传：req_id 恒为 None（单请求，无需分片聚合）
+      - 下载：req_id 是本次 Range 请求的唯一标识，用于按分片累加进度
+    """
     now = time.time()
     with TRANSFERS_LOCK:
         if direction == "up":
@@ -1304,31 +1313,50 @@ def _new_transfer(direction, name, size, offset, client,
                     old["client"] = client
                     old["client_key"] = client_key_val
                     old["cid"] = cid
-                    return old_tid
+                    return old_tid, None
         else:
-            # 下载：同一客户端 + 同一文件 → 复用现有记录
-            # 浏览器会用多线程 / 多 Range 请求下载同一文件，
-            # 若每次请求都新建 transfer，会出现多条进度条，且失败分片会显示暂停
+            # 下载：同一客户端 + 同一文件 → 永远复用同一个 tid
+            #
+            # 浏览器下载同一个文件时，可能发出多个请求：
+            #   - 大文件：多个并行 Range 请求 → 复用记录，按分片累加进度
+            #   - 小文件：先探测 / 串行重试 → 前一次已完成，后一次触发
+            #
+            # 若不复用已完成的记录，GUI 会出现两条进度条（旧记录 done 状态
+            # 尚未被 GC，新请求又建了一条）。这里对已完成记录做"复位后复用"，
+            # 让它继续对应同一个下载任务。
             for old_tid, old in list(TRANSFERS.items()):
                 if (old["dir"] == "down"
                         and old["name"] == name
                         and old["size"] == size
-                        and old.get("client_key") == client_key_val
-                        and not (old["done"] and old["ok"])):
-                    old["received"] = offset
-                    old["t0"] = now
-                    old["last_t"] = now
-                    old["last_b"] = offset
-                    old["speed"] = 0.0
-                    old["done"] = False
-                    old["ok"] = False
+                        and old.get("client_key") == client_key_val):
+                    if old.get("done") and old.get("ok"):
+                        # 已完成的记录：视为新一次下载，复位状态
+                        old["completed_bytes"] = 0
+                        old["chunks"] = {}
+                        old["received"] = 0
+                        old["speed"] = 0.0
+                        old["done"] = False
+                        old["ok"] = False
+                        old["done_at"] = None
+
                     old["paused"] = False
                     old["error"] = None
                     old["client"] = client
-                    return old_tid
+                    old["t0"] = now
+                    old["last_t"] = now
+
+                    req_id = next(_TID)
+                    old.setdefault("completed_bytes", 0)
+                    chunks = old.setdefault("chunks", {})
+                    chunks[req_id] = 0
+                    old["received"] = (old["completed_bytes"]
+                                       + sum(chunks.values()))
+                    old["last_b"] = old["received"]
+
+                    return old_tid, req_id
 
         tid = next(_TID)
-        TRANSFERS[tid] = {
+        rec = {
             "id": tid, "dir": direction, "name": name, "size": size,
             "received": offset, "t0": now, "last_t": now, "last_b": offset,
             "speed": 0.0, "done": False, "ok": False,
@@ -1336,10 +1364,23 @@ def _new_transfer(direction, name, size, offset, client,
             "client_key": client_key_val,
             "cid": cid,
         }
-    return tid
+        if direction == "down":
+            req_id = next(_TID)
+            rec["completed_bytes"] = 0
+            rec["chunks"] = {req_id: 0}
+            rec["received"] = 0
+        else:
+            req_id = None
+        TRANSFERS[tid] = rec
+    return tid, req_id
 
 
-def _update_transfer(tid, received):
+def _update_transfer(tid, received, req_id=None):
+    """更新传输进度。
+
+    下载（req_id 非 None）时，received 是"本次分片已发送的字节数"，
+    函数会把它登记到 chunks 里，并用所有分片的总和刷新整体进度。
+    """
     now = time.time()
     with TRANSFERS_LOCK:
         t = TRANSFERS.get(tid)
@@ -1348,6 +1389,12 @@ def _update_transfer(tid, received):
         # 已成功完成 → 锁定状态（多请求复用同一 tid 时，避免其他分片回写覆盖）
         if t.get("done") and t.get("ok"):
             return
+
+        chunks = t.get("chunks")
+        if req_id is not None and chunks is not None and req_id in chunks:
+            chunks[req_id] = received
+            received = t.get("completed_bytes", 0) + sum(chunks.values())
+
         t["received"] = received
         dt = now - t["last_t"]
         if dt >= 0.5:
@@ -1360,7 +1407,7 @@ def _update_transfer(tid, received):
             t["last_b"] = received
 
 
-def _pause_transfer(tid, reason=None):
+def _pause_transfer(tid, reason=None, req_id=None):
     with TRANSFERS_LOCK:
         t = TRANSFERS.get(tid)
         if not t:
@@ -1368,11 +1415,46 @@ def _pause_transfer(tid, reason=None):
         # 已成功完成 → 不再被覆盖为暂停（多请求复用同一 tid 时的保护）
         if t.get("done") and t.get("ok"):
             return
-        t["done"] = False
-        t["ok"] = False
-        t["paused"] = True
-        t["error"] = reason
-        t["speed"] = 0.0
+
+        chunks = t.get("chunks")
+        if req_id is not None and chunks is not None and req_id in chunks:
+            # 本次分片已发送的字节永久并入累计值
+            t["completed_bytes"] = (t.get("completed_bytes", 0)
+                                    + chunks.pop(req_id))
+            t["received"] = t["completed_bytes"] + sum(chunks.values())
+
+        # 所有分片都断开后才标记为暂停
+        # （多分片并发时，某个分片被单独掐断不应让整个进度条显示暂停）
+        if not chunks:
+            t["done"] = False
+            t["ok"] = False
+            t["paused"] = True
+            t["paused_at"] = time.time()
+            t["error"] = reason
+            t["speed"] = 0.0
+
+
+def _detach_chunk(tid, req_id):
+    """下载分片正常结束：把该分片最终已发送的字节数并入累计值。
+    如果整体进度达到文件大小，标记为完成。"""
+    with TRANSFERS_LOCK:
+        t = TRANSFERS.get(tid)
+        if not t:
+            return
+        chunks = t.get("chunks")
+        if chunks is None or req_id not in chunks:
+            return
+        t["completed_bytes"] = t.get("completed_bytes", 0) + chunks.pop(req_id)
+        t["received"] = t["completed_bytes"] + sum(chunks.values())
+
+        if t["received"] >= t["size"]:
+            t["done"] = True
+            t["ok"] = True
+            t["paused"] = False
+            t["error"] = None
+            t["done_at"] = time.time()
+            t["received"] = t["size"]
+            t["speed"] = 0.0
 
 
 def _finish_transfer(tid, ok, error=None):
@@ -1395,6 +1477,14 @@ def _gc_transfers(max_age=5.0):
         for tid in list(TRANSFERS.keys()):
             t = TRANSFERS[tid]
             if t["done"] and now - t.get("done_at", t["t0"]) > max_age:
+                del TRANSFERS[tid]
+                continue
+            # 浏览器"暂停"与"取消"在 TCP 层无法区分（都是连接断开）。
+            # 这里保留暂停记录让"暂停"状态能显示出来；
+            # 但如果超过 30 秒还没有恢复（新的 Range 请求会复用记录，
+            # 从而清掉 paused 状态），就认定是"取消"，清理掉避免永久残留。
+            if (t["dir"] == "down" and t.get("paused")
+                    and now - t.get("paused_at", t["t0"]) > 30.0):
                 del TRANSFERS[tid]
 
 
@@ -1440,6 +1530,60 @@ def fmt_bytes(b):
 def fmt_speed(bps):
     return fmt_bytes(bps) + "/s"
 
+# =====================================================================
+#  零拷贝文件推送（os.sendfile）
+# =====================================================================
+
+class _SendfileUnsupported(Exception):
+    """首次 sendfile 调用就失败（平台/对象不支持），用于触发回退。"""
+
+
+def _stream_sendfile(sock, f, start, length, on_progress=None):
+    sent = 0
+    while sent < length:
+        count = min(_SENDFILE_CHUNK, length - sent)
+        try:
+            n = os.sendfile(sock, f, start + sent, count)
+        except InterruptedError:
+            continue
+        except OSError as e:
+            if sent == 0:
+                # 一次都没成功 → 说明平台/对象不支持，交给上层回退
+                raise _SendfileUnsupported() from e
+            raise
+        if n == 0:
+            break
+        sent += n
+        if on_progress is not None:
+            on_progress(sent)
+    return sent
+
+
+def _stream_read_write(sock, f, start, length, on_progress=None):
+    f.seek(start)
+    sent = 0
+    while sent < length:
+        chunk = f.read(min(CHUNK, length - sent))
+        if not chunk:
+            break
+        sock.sendall(chunk)
+        sent += len(chunk)
+        if on_progress is not None:
+            on_progress(sent)
+    return sent
+
+
+def stream_file_to_socket(sock, f, start, length, on_progress=None):
+    """
+    把文件 [start, start+length) 区间推给 socket。
+    优先 os.sendfile（零拷贝），首次失败自动回退到 read/write。
+    """
+    if hasattr(os, "sendfile"):
+        try:
+            return _stream_sendfile(sock, f, start, length, on_progress)
+        except _SendfileUnsupported:
+            pass
+    return _stream_read_write(sock, f, start, length, on_progress)
 
 # =====================================================================
 #  HTTP
@@ -2140,33 +2284,36 @@ class Handler(BaseHTTPRequestHandler):
         # 微信内置浏览器下载行为不可靠（安卓 X5 拦截、iOS 无断点续传），
         # 对微信 UA 不追踪进度，避免出现无意义的进度条
         tid = None
+        req_id = None
         if not inline and not self._is_wechat():
-            tid = _new_transfer("down", safe, size, start, self._me_name(),
-                                client_key_val=me)
+            tid, req_id = _new_transfer(
+                "down", safe, size, start, self._me_name(),
+                client_key_val=me)
 
-        sent = 0
+        # 注意：这里传的是"本次分片已发送的字节数"，不是文件里的绝对偏移
+        def _on_progress(sent_in_file):
+            if tid is not None:
+                _update_transfer(tid, sent_in_file, req_id)
+
         try:
             with open(full, "rb") as f:
-                f.seek(start)
-                remaining = length
-                while remaining > 0:
-                    chunk = f.read(min(CHUNK, remaining))
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    sent += len(chunk)
-                    remaining -= len(chunk)
-                    if tid is not None:
-                        _update_transfer(tid, start + sent)
+                # wfile 里可能还有缓冲的数据，切到直接写 socket 前先 flush
+                try:
+                    self.wfile.flush()
+                except Exception:
+                    pass
+                stream_file_to_socket(
+                    self.connection, f, start, length, _on_progress
+                )
 
             if tid is not None:
-                _finish_transfer(tid, True)
+                _detach_chunk(tid, req_id)
         except (BrokenPipeError, ConnectionResetError):
             if tid is not None:
-                _pause_transfer(tid, "客户端断开")
+                _pause_transfer(tid, "客户端断开", req_id)
         except Exception as e:
             if tid is not None:
-                _pause_transfer(tid, str(e))
+                _pause_transfer(tid, str(e), req_id)
 
     def _serve_thumb(self, name):
         """
@@ -2436,7 +2583,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         who = self._me_name()
-        tid = _new_transfer("up", name, size, offset, who, from_client, cid)
+        tid, _ = _new_transfer("up", name, size, offset, who, from_client, cid)
 
         received = offset
         try:
