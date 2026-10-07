@@ -1090,6 +1090,11 @@ h1{
   background:var(--accent);color:#fff;border-color:var(--accent);
 }
 .preview-btn.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#fff;}
+.preview-btn:disabled{
+  opacity:.35;
+  cursor:not-allowed;
+  pointer-events:none;
+}
 
 .preview-body{
   flex:1 1 auto;
@@ -1104,6 +1109,18 @@ h1{
   box-sizing:border-box;
   overscroll-behavior:contain;
   -webkit-overflow-scrolling:touch;
+}
+
+/* 切换预览时的内容淡入（图片类不做动画，靠预加载直接出现） */
+@keyframes preview-switch-in{
+  from{opacity:0;}
+  to{opacity:1;}
+}
+.preview-body.preview-switching{
+  animation:preview-switch-in .15s ease;
+}
+.preview-modal.kind-image .preview-body.preview-switching{
+  animation:none;
 }
 
 .preview-image,
@@ -1122,8 +1139,68 @@ h1{
   background:#000;
   box-shadow:0 4px 24px rgba(0,0,0,.25);
 }
+/* 图片预览包裹层：负责裁剪、居中、捕获手势 */
+.preview-image-wrap{
+  position:relative;
+  width:100%;
+  height:100%;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  overflow:hidden;
+  touch-action:none;
+  user-select:none;
+  -webkit-user-select:none;
+  cursor:default;
+}
+.preview-image-wrap.is-zoomed{
+  cursor:grab;
+}
+.preview-image-wrap.is-dragging{
+  cursor:grabbing;
+}
+
+/* 图片本体：布局尺寸按原图 fit 到容器，缩放靠 transform */
 .preview-image{
+  display:block;
+  max-width:100%;
+  max-height:100%;
+  width:auto;
+  height:auto;
+  object-fit:contain;
+  transform-origin:50% 50%;
+  will-change:transform;
+  backface-visibility:hidden;
+  -webkit-backface-visibility:hidden;
+  user-select:none;
+  -webkit-user-select:none;
+  -webkit-user-drag:none;
   box-shadow:0 4px 24px rgba(0,0,0,.15);
+  transition:transform .2s ease;
+  pointer-events:none;
+}
+
+/* 缩放提示气泡（右下角） */
+.preview-zoom-badge{
+  position:absolute;
+  right:14px;
+  bottom:14px;
+  padding:4px 10px;
+  border-radius:999px;
+  background:rgba(0,0,0,.55);
+  color:#fff;
+  font-size:11.5px;
+  font-weight:600;
+  font-variant-numeric:tabular-nums;
+  pointer-events:none;
+  opacity:0;
+  transition:opacity .18s ease;
+  z-index:3;
+}
+.preview-zoom-badge.show{opacity:1;}
+
+@media (max-width:900px), (pointer:coarse){
+  .preview-zoom-badge{right:10px;bottom:10px;}
 }
 
 .preview-modal.kind-image .preview-body,

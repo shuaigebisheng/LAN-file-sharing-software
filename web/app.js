@@ -153,10 +153,6 @@ function toast(msg){
 
 /* =========================================================
    微信下载引导
-   微信内置浏览器对文件下载支持极差：
-     - 安卓 X5 内核会拦截 attachment 下载，弹"在浏览器打开"
-     - iOS WKWebView 自实现的下载器无断点续传，大文件易失败
-   策略：微信环境下拦截所有下载点击，弹出"复制链接 / 在浏览器打开"引导
    ========================================================= */
 
 function isWechat(){
@@ -168,7 +164,7 @@ function downloadUrl(name){
 }
 
 function handleDownloadClick(e, name){
-  if(!isWechat()) return;   // 非微信：正常走 a 标签下载
+  if(!isWechat()) return;
   e.preventDefault();
   showWechatDownloadGuide(name);
 }
@@ -176,7 +172,6 @@ function handleDownloadClick(e, name){
 function showWechatDownloadGuide(name){
   const url = location.origin + '/dl?name=' + encodeURIComponent(name);
 
-  // 避免重复弹窗
   const old = document.getElementById('wxDownloadGuide');
   if(old) old.remove();
 
@@ -1591,9 +1586,7 @@ async function downloadSelectedAsZip(){
   const names = Array.from(selectedFiles);
   if(!names.length) return;
 
-  // 微信内置浏览器无法可靠处理 blob 下载，直接走引导
   if(isWechat()){
-    const fake = '（已选 ' + names.length + ' 个文件）.zip';
     toast('微信内无法打包下载，请使用浏览器打开');
     return;
   }
@@ -1924,24 +1917,18 @@ const PREVIEW_IMAGE_EXT = new Set(['jpg','jpeg','png','gif','webp','bmp','svg','
 const PREVIEW_VIDEO_EXT = new Set(['mp4','webm','ogv','mov']);
 const PREVIEW_AUDIO_EXT = new Set(['mp3','wav','ogg','oga','m4a','flac','aac','opus']);
 const PREVIEW_PDF_EXT   = new Set(['pdf']);
-// 走 /api/ooxml 端点的所有 Office 后缀
 const PREVIEW_OOXML_EXT = new Set([
-  // Word
   'docx', 'docm', 'dotx', 'dotm',
   'doc', 'dot', 'rtf',
   'odt', 'ott', 'fodt',
-  // Excel
   'xlsx', 'xlsm', 'xltx', 'xltm',
   'xls', 'xlsb',
   'ods', 'ots', 'fods',
-  // PowerPoint
   'pptx', 'pptm', 'potx', 'potm',
   'ppt', 'pps', 'ppsx', 'pot',
   'odp', 'otp', 'fodp',
 ]);
 
-// 前端 docx-preview 能直接渲染的子集
-// 这几个后缀内部结构一致（word/document.xml），docx-preview 都能处理
 const PREVIEW_DOCX_EXT = new Set(['docx', 'dotx', 'docm', 'dotm']);
 const PREVIEW_TEXT_EXT  = new Set([
   'txt','md','markdown','log','json','xml','yaml','yml','toml','ini','conf','cfg',
@@ -1952,7 +1939,27 @@ const PREVIEW_TEXT_EXT  = new Set([
 const MAX_TEXT_PREVIEW = 2 * 1024 * 1024;
 
 let previewMaskEl = null;
-let previewCleanupFns = [];
+let previewCleanupFns = [];          // 整个预览生命周期（键盘监听、移除 mask）
+let _previewBodyCleanupFns = [];     // 当前 body 内容的清理（每次切换前执行）
+
+// 当前预览状态（用于切换时复用 DOM）
+let _previewFile = null;
+let _previewModal = null;
+let _previewBody = null;
+let _previewTitleEl = null;
+let _previewSubEl = null;
+let _previewPrevBtn = null;
+let _previewNextBtn = null;
+let _previewDlBtn = null;
+let _previewNav = { prev: null, next: null };
+
+function addBodyCleanup(fn){ _previewBodyCleanupFns.push(fn); }
+function runBodyCleanups(){
+  for(const fn of _previewBodyCleanupFns){
+    try{ fn(); }catch(e){}
+  }
+  _previewBodyCleanupFns = [];
+}
 
 function extOf(name){
   const m = /\.([a-z0-9]+)$/i.exec(name || '');
@@ -1979,7 +1986,7 @@ function renderPdfInto(container, url, file){
   container.appendChild(wrap);
 
   let destroyed = false;
-  previewCleanupFns.push(() => { destroyed = true; });
+  addBodyCleanup(() => { destroyed = true; });
 
   const loading = document.createElement('div');
   loading.className = 'pdfjs-loading';
@@ -2036,6 +2043,7 @@ function renderPdfInto(container, url, file){
     }
   })();
 }
+
 /* ---------------- docx-preview 前端渲染 ---------------- */
 
 async function renderDocxWithPreview(file, body, modal){
@@ -2045,12 +2053,10 @@ async function renderDocxWithPreview(file, body, modal){
   body.appendChild(wrap);
 
   let aborted = false;
-  previewCleanupFns.push(() => { aborted = true; });
+  addBodyCleanup(() => { aborted = true; });
 
-  // 检查库是否加载
   if(!window.docx || typeof window.docx.renderAsync !== 'function'){
     wrap.remove();
-    // 库没加载 → 直接回退到服务端
     fallbackOoxmlToServer(file, body, modal);
     return;
   }
@@ -2084,7 +2090,6 @@ async function renderDocxWithPreview(file, body, modal){
     });
   } catch(e){
     if(aborted) return;
-    // 渲染失败 → 回退到服务端
     wrap.remove();
     console.warn('docx-preview 失败，回退到服务端：', e);
     fallbackOoxmlToServer(file, body, modal);
@@ -2100,7 +2105,7 @@ function fallbackOoxmlToServer(file, body, modal){
   body.appendChild(wrap);
 
   let aborted = false;
-  previewCleanupFns.push(() => { aborted = true; });
+  addBodyCleanup(() => { aborted = true; });
 
   fetch('/api/ooxml?name=' + encodeURIComponent(file.name),
         {cache: 'no-store'})
@@ -2136,10 +2141,16 @@ function fallbackOoxmlToServer(file, body, modal){
 /* ---------------- 打开预览 ---------------- */
 
 function openPreview(file){
-  closePreview();
+  // 预览层已经打开 → 平滑切换，不重建骨架
+  if(_previewFile && previewMaskEl && _previewModal){
+    switchPreview(file);
+    return;
+  }
+  _openPreviewFirstTime(file);
+}
 
+function _openPreviewFirstTime(file){
   const kind = previewKind(file.name);
-  const previewUrl = '/preview/' + encodeURIComponent(file.name);
 
   const mask = document.createElement('div');
   mask.className = 'preview-mask';
@@ -2152,47 +2163,242 @@ function openPreview(file){
 
   const titleBox = document.createElement('div');
   titleBox.className = 'preview-title-box';
+
   const titleEl = document.createElement('div');
   titleEl.className = 'preview-title';
-  titleEl.textContent = file.name;
-  titleEl.title = file.name;
+
   const subEl = document.createElement('div');
   subEl.className = 'preview-sub';
-  subEl.textContent = fmtSize(file.size) + ' · ' + fmtTime(file.added_at || file.mtime);
+
   titleBox.append(titleEl, subEl);
 
   const actions = document.createElement('div');
   actions.className = 'preview-actions';
 
+  // ---- 上一个 ----
+  const prevBtn = document.createElement('button');
+  prevBtn.type = 'button';
+  prevBtn.className = 'preview-btn';
+  prevBtn.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<polyline points="15 18 9 12 15 6"/></svg><span>上一个</span>';
+  prevBtn.onclick = () => {
+    if(_previewNav.prev) openPreview(_previewNav.prev);
+  };
+
+  // ---- 下一个 ----
+  const nextBtn = document.createElement('button');
+  nextBtn.type = 'button';
+  nextBtn.className = 'preview-btn';
+  nextBtn.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<polyline points="9 18 15 12 9 6"/></svg><span>下一个</span>';
+  nextBtn.onclick = () => {
+    if(_previewNav.next) openPreview(_previewNav.next);
+  };
+
+  // ---- 下载 ----
   const dl = document.createElement('a');
   dl.className = 'preview-btn primary';
-  dl.href = downloadUrl(file.name);
-  dl.setAttribute('download', file.name);
   dl.innerHTML = iconSvg('download') + '<span>下载</span>';
-  dl.addEventListener('click', e => handleDownloadClick(e, file.name));
+  dl.addEventListener('click', e => {
+    if(_previewFile) handleDownloadClick(e, _previewFile.name);
+  });
 
+  // ---- 关闭 ----
   const closeBtn = document.createElement('button');
   closeBtn.className = 'preview-btn';
   closeBtn.type = 'button';
   closeBtn.innerHTML = iconSvg('close') + '<span>关闭</span>';
   closeBtn.onclick = closePreview;
 
-  actions.append(dl, closeBtn);
+  actions.append(prevBtn, nextBtn, dl, closeBtn);
   head.append(titleBox, actions);
 
   const body = document.createElement('div');
   body.className = 'preview-body';
 
   modal.append(head, body);
+  mask.appendChild(modal);
+
+  mask.addEventListener('click', e => {
+    if(e.target === mask) closePreview();
+  });
+  // ---- 触摸左右滑动切图（仅图片类型） ----
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchActive = false;
+
+  mask.addEventListener('touchstart', e => {
+    if(e.touches.length !== 1) return;
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    touchActive = true;
+  }, {passive: true});
+
+  mask.addEventListener('touchend', e => {
+    if(!touchActive) return;
+    touchActive = false;
+    if(e.changedTouches.length !== 1) return;
+    if(!_previewFile) return;
+    if(previewKind(_previewFile.name) !== 'image') return;
+
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    const dy = e.changedTouches[0].clientY - touchStartY;
+
+    // 水平位移要够大，且明显比垂直大，才认为是滑动
+    if(Math.abs(dx) < 50) return;
+    if(Math.abs(dy) > Math.abs(dx)) return;
+
+    if(dx > 0 && _previewNav.prev){
+      openPreview(_previewNav.prev);   // 右滑 → 上一张
+    } else if(dx < 0 && _previewNav.next){
+      openPreview(_previewNav.next);   // 左滑 → 下一张
+    }
+  }, {passive: true});
+  
+  document.body.appendChild(mask);
+  document.body.classList.add('preview-open');
+
+  document.addEventListener('keydown', onPreviewKey, true);
+  previewCleanupFns.push(() => {
+    document.removeEventListener('keydown', onPreviewKey, true);
+  });
+
+  // ---- 保存引用 ----
+  previewMaskEl    = mask;
+  _previewModal    = modal;
+  _previewBody     = body;
+  _previewTitleEl  = titleEl;
+  _previewSubEl    = subEl;
+  _previewPrevBtn  = prevBtn;
+  _previewNextBtn  = nextBtn;
+  _previewDlBtn    = dl;
+  _previewFile     = null;
+
+  // 首次渲染内容
+  switchPreview(file);
+}
+
+/* 预加载当前图片前后各 N 张图片，让切换无网络等待 */
+const _PRELOAD_RANGE = 2;
+
+function preloadAdjacentImages(idx){
+  if(idx < 0) return;
+  for(let d = 1; d <= _PRELOAD_RANGE; d++){
+    if(idx - d >= 0){
+      const f = files[idx - d];
+      if(f && previewKind(f.name) === 'image'){
+        const im = new Image();
+        im.decoding = 'async';
+        im.src = '/preview/' + encodeURIComponent(f.name);
+      }
+    }
+    if(idx + d < files.length){
+      const f = files[idx + d];
+      if(f && previewKind(f.name) === 'image'){
+        const im = new Image();
+        im.decoding = 'async';
+        im.src = '/preview/' + encodeURIComponent(f.name);
+      }
+    }
+  }
+}
+
+function switchPreview(file){
+  const modal = _previewModal;
+  const body  = _previewBody;
+  if(!modal || !body) return;
+
+  // 1. 清理上一次 body 里的资源
+  runBodyCleanups();
+
+  // 2. 计算上一个/下一个（与当前列表顺序一致）
+  const idx = files.findIndex(f => f.name === file.name);
+  const prevFile = (idx > 0) ? files[idx - 1] : null;
+  const nextFile = (idx >= 0 && idx < files.length - 1) ? files[idx + 1] : null;
+  _previewNav = { prev: prevFile, next: nextFile };
+
+  // 3. 更新标题栏
+  _previewTitleEl.textContent = file.name;
+  _previewTitleEl.title = file.name;
+
+  let subText = fmtSize(file.size) + ' · ' +
+                fmtTime(file.added_at || file.mtime);
+  if(idx >= 0 && files.length > 1){
+    subText += ' · ' + (idx + 1) + ' / ' + files.length;
+  }
+  _previewSubEl.textContent = subText;
+
+  // 4. 更新按钮状态
+  _previewPrevBtn.disabled = !prevFile;
+  _previewPrevBtn.title = prevFile
+    ? ('上一个：' + prevFile.name + '  (←)')
+    : '已经是第一个';
+
+  _previewNextBtn.disabled = !nextFile;
+  _previewNextBtn.title = nextFile
+    ? ('下一个：' + nextFile.name + '  (→)')
+    : '已经是最后一个';
+
+  _previewDlBtn.href = downloadUrl(file.name);
+  _previewDlBtn.setAttribute('download', file.name);
+
+  // 5. 更新 modal kind（只有变化时才写，避免重排）
+  const kind = previewKind(file.name);
+  const newCls = 'preview-modal kind-' + kind;
+  if(modal.className !== newCls){
+    modal.className = newCls;
+  }
+
+  // 6. 清空 body 并重绘
+  body.innerHTML = '';
+
+  // 图片类：不做淡入动画（预加载后直接出现，更接近原生手感）
+  // 其他类型：保留淡淡的过渡
+  if(kind === 'image'){
+    body.classList.remove('preview-switching');
+  } else {
+    body.classList.remove('preview-switching');
+    void body.offsetWidth;
+    body.classList.add('preview-switching');
+  }
+
+  _previewFile = file;
+  renderPreviewContent(file, body, modal);
+
+  // 7. 预加载相邻图片
+  if(kind === 'image'){
+    preloadAdjacentImages(idx);
+  }
+}
+
+function renderPreviewContent(file, body, modal){
+  const kind = previewKind(file.name);
+  const previewUrl = '/preview/' + encodeURIComponent(file.name);
 
   if(kind === 'image'){
+    const wrap = document.createElement('div');
+    wrap.className = 'preview-image-wrap';
+
     const img = document.createElement('img');
     img.className = 'preview-image';
-    img.src = previewUrl;
     img.alt = file.name;
+    img.decoding = 'async';
+    img.draggable = false;
     img.onerror = () => showPreviewFallback(body, file, '图片加载失败');
-    body.appendChild(img);
-  } else if(kind === 'video'){
+    img.onload = () => {
+      requestAnimationFrame(() => setupImageZoom(wrap, img, body));
+    };
+
+    wrap.appendChild(img);
+    body.appendChild(wrap);
+
+    // wrap 自己处理点击遮罩关闭（点击空白区域）
+    img.src = previewUrl;
+  }else if(kind === 'video'){
     const v = document.createElement('video');
     v.className = 'preview-video';
     v.src = previewUrl;
@@ -2200,7 +2406,8 @@ function openPreview(file){
     v.autoplay = false;
     v.preload = 'metadata';
     body.appendChild(v);
-    previewCleanupFns.push(() => { try{ v.pause(); v.src = ''; }catch(e){} });
+    addBodyCleanup(() => { try{ v.pause(); v.src = ''; }catch(e){} });
+
   } else if(kind === 'audio'){
     const wrap = document.createElement('div');
     wrap.className = 'preview-audio-wrap';
@@ -2213,18 +2420,19 @@ function openPreview(file){
     a.preload = 'metadata';
     wrap.append(ic, a);
     body.appendChild(wrap);
-    previewCleanupFns.push(() => { try{ a.pause(); a.src = ''; }catch(e){} });
+    addBodyCleanup(() => { try{ a.pause(); a.src = ''; }catch(e){} });
+
   } else if(kind === 'pdf'){
     renderPdfInto(body, previewUrl, file);
+
   } else if(kind === 'ooxml'){
     const ext = extOf(file.name);
     if(PREVIEW_DOCX_EXT.has(ext)){
-      // docx 家族：前端 docx-preview 优先
       renderDocxWithPreview(file, body, modal);
     } else {
-      // 其他 Office 格式：走服务端（LibreOffice → PDF）
       fallbackOoxmlToServer(file, body, modal);
     }
+
   } else if(kind === 'text'){
     if(file.size > MAX_TEXT_PREVIEW){
       showPreviewFallback(body, file,
@@ -2235,7 +2443,7 @@ function openPreview(file){
       pre.textContent = '加载中…';
       body.appendChild(pre);
       let aborted = false;
-      previewCleanupFns.push(() => { aborted = true; });
+      addBodyCleanup(() => { aborted = true; });
       fetch(previewUrl, {cache: 'no-store'})
         .then(r => {
           if(!r.ok) throw new Error('HTTP ' + r.status);
@@ -2251,23 +2459,366 @@ function openPreview(file){
           pre.classList.add('error');
         });
     }
+
   } else {
     showPreviewFallback(body, file, '该文件类型暂不支持在线预览');
   }
+}
 
-  mask.addEventListener('click', e => {
-    if(e.target === mask) closePreview();
-  });
+/* =========================================================
+   图片缩放 / 平移 / 双击
+   ---------------------------------------------------------
+   - PC:   滚轮缩放（以光标为中心）、双击 1x↔2x、
+           放大后按住左键拖拽平移
+   - 触屏: 双指捏合缩放（以双指中心为焦点）、
+           单指拖拽平移（仅放大后）、双击 1x↔2x
+   - 切换到其他文件时，wrap 会被重建，所以状态自然重置
+   ========================================================= */
 
-  mask.appendChild(modal);
-  document.body.appendChild(mask);
+function setupImageZoom(wrap, img, body){
+  const MIN_SCALE = 1;
+  const MAX_SCALE = 8;
+  const DBL_SCALE = 2;
+  const DBL_TAP_MS = 280;
+  const WHEEL_STEP = 1.15;
 
-  previewMaskEl = mask;
-  document.body.classList.add('preview-open');
+  const state = {
+    scale: 1,
+    tx: 0,
+    ty: 0,
+    imgW: 0,
+    imgH: 0,
+    wrapW: 0,
+    wrapH: 0,
+    wrapLeft: 0,
+    wrapTop: 0,
+  };
 
-  document.addEventListener('keydown', onPreviewKey, true);
-  previewCleanupFns.push(() => {
-    document.removeEventListener('keydown', onPreviewKey, true);
+  // ---------------------------------------------------------
+  //  rAF 节流：事件里只改 state，写 DOM 交给下一帧
+  // ---------------------------------------------------------
+  let _applyRaf = 0;
+  function scheduleApply(){
+    if(_applyRaf) return;
+    _applyRaf = requestAnimationFrame(() => {
+      _applyRaf = 0;
+      apply();
+    });
+  }
+  function cancelApply(){
+    if(_applyRaf){
+      cancelAnimationFrame(_applyRaf);
+      _applyRaf = 0;
+    }
+  }
+
+  // ---------------------------------------------------------
+  //  缩放提示气泡
+  // ---------------------------------------------------------
+  const badge = document.createElement('div');
+  badge.className = 'preview-zoom-badge';
+  wrap.appendChild(badge);
+  let badgeTimer = null;
+  function showBadge(){
+    badge.textContent = Math.round(state.scale * 100) + '%';
+    badge.classList.add('show');
+    if(badgeTimer) clearTimeout(badgeTimer);
+    badgeTimer = setTimeout(() => {
+      badge.classList.remove('show');
+      badgeTimer = null;
+    }, 900);
+  }
+
+  // ---------------------------------------------------------
+  //  测量（缓存 rect，避免高频 touchmove 里 layout thrashing）
+  // ---------------------------------------------------------
+  function measure(){
+    const r = wrap.getBoundingClientRect();
+    state.wrapW = r.width;
+    state.wrapH = r.height;
+    state.wrapLeft = r.left;
+    state.wrapTop = r.top;
+    state.imgW = img.clientWidth;
+    state.imgH = img.clientHeight;
+  }
+
+  // ---------------------------------------------------------
+  //  平移边界限制
+  // ---------------------------------------------------------
+  function clampT(tx, ty, scale){
+    const dw = state.imgW * scale;
+    const dh = state.imgH * scale;
+    const maxTx = Math.max(0, (dw - state.wrapW) / 2);
+    const maxTy = Math.max(0, (dh - state.wrapH) / 2);
+    if(tx >  maxTx) tx =  maxTx;
+    if(tx < -maxTx) tx = -maxTx;
+    if(ty >  maxTy) ty =  maxTy;
+    if(ty < -maxTy) ty = -maxTy;
+    return [tx, ty];
+  }
+
+  // ---------------------------------------------------------
+  //  实际写 DOM（只在 rAF 回调里跑）
+  // ---------------------------------------------------------
+  let _wasZoomed = false;
+  function apply(){
+    const c = clampT(state.tx, state.ty, state.scale);
+    state.tx = c[0];
+    state.ty = c[1];
+    img.style.transform =
+      'translate3d(' + state.tx + 'px,' + state.ty + 'px,0) ' +
+      'scale(' + state.scale + ')';
+
+    // 只在状态真正翻转时才动 class，避免每帧触样式重算
+    const isZoomed = state.scale > 1.001;
+    if(isZoomed !== _wasZoomed){
+      _wasZoomed = isZoomed;
+      wrap.classList.toggle('is-zoomed', isZoomed);
+    }
+  }
+
+  // ---------------------------------------------------------
+  //  以 (px, py) 为焦点缩放，px/py 是 wrap 内坐标
+  // ---------------------------------------------------------
+  function zoomAt(px, py, newScale){
+    newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
+    if(Math.abs(newScale - state.scale) < 0.0001) return;
+
+    const cx = state.wrapW / 2;
+    const cy = state.wrapH / 2;
+    const k = newScale / state.scale;
+    const dx = px - cx;
+    const dy = py - cy;
+    state.tx = dx - (dx - state.tx) * k;
+    state.ty = dy - (dy - state.ty) * k;
+    state.scale = newScale;
+    scheduleApply();
+  }
+
+  function reset(){
+    state.scale = 1;
+    state.tx = 0;
+    state.ty = 0;
+    scheduleApply();
+  }
+
+  measure();
+  apply();
+
+  // =========================================================
+  //  PC: 滚轮缩放
+  // =========================================================
+  const onWheel = e => {
+    e.preventDefault();
+    const mx = e.clientX - state.wrapLeft;
+    const my = e.clientY - state.wrapTop;
+    const factor = e.deltaY < 0 ? WHEEL_STEP : (1 / WHEEL_STEP);
+    zoomAt(mx, my, state.scale * factor);
+    showBadge();
+  };
+  wrap.addEventListener('wheel', onWheel, {passive: false});
+
+  // =========================================================
+  //  PC: 双击 1x ↔ 2x
+  // =========================================================
+  const onDblClick = e => {
+    e.preventDefault();
+    if(state.scale > 1.001){
+      reset();
+    } else {
+      zoomAt(e.clientX - state.wrapLeft,
+             e.clientY - state.wrapTop,
+             DBL_SCALE);
+    }
+    showBadge();
+  };
+  wrap.addEventListener('dblclick', onDblClick);
+
+  // =========================================================
+  //  PC: 拖拽平移（仅放大后）
+  // =========================================================
+  let dragging = false;
+  let dragStart = null;
+
+  const onMouseDown = e => {
+    if(e.button !== 0) return;
+    if(state.scale <= 1.001) return;
+    dragging = true;
+    dragStart = {
+      x: e.clientX,
+      y: e.clientY,
+      tx: state.tx,
+      ty: state.ty,
+    };
+    img.style.transition = 'none';
+    // 强制同步 flush：让浏览器立刻把上面这行 transition:none 应用上，
+    // 否则头几个 mousemove 里还带着 0.2s 的补间，手感会发黏
+    void img.offsetWidth;
+    wrap.classList.add('is-dragging');
+    e.preventDefault();
+  };
+
+  const onMouseMove = e => {
+    if(!dragging) return;
+    state.tx = dragStart.tx + (e.clientX - dragStart.x);
+    state.ty = dragStart.ty + (e.clientY - dragStart.y);
+    // PC 端 mousemove 已被浏览器按帧合并，直接同步 apply 最跟手。
+    // 若用 rAF 再节流，相当于每次再推迟一帧，会明显"黏"。
+    apply();
+  };
+
+  const onMouseUp = () => {
+    if(!dragging) return;
+    dragging = false;
+    dragStart = null;
+    img.style.transition = '';
+    wrap.classList.remove('is-dragging');
+  };
+
+  wrap.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mouseup', onMouseUp);
+
+  // =========================================================
+  //  触屏: 单指平移 / 双指捏合 / 双击
+  // =========================================================
+  let touch = null;
+  let lastTapTime = 0;
+
+  const onTouchStart = e => {
+    if(e.touches.length === 1){
+      const t = e.touches[0];
+      touch = {
+        mode: 'pan',
+        startX: t.clientX,
+        startY: t.clientY,
+        startTx: state.tx,
+        startTy: state.ty,
+        moved: false,
+      };
+      img.style.transition = 'none';
+    } else if(e.touches.length === 2){
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const dist = Math.hypot(t1.clientX - t2.clientX,
+                              t1.clientY - t2.clientY);
+      const cx = (t1.clientX + t2.clientX) / 2;
+      const cy = (t1.clientY + t2.clientY) / 2;
+      touch = {
+        mode: 'pinch',
+        startDist: dist,
+        startScale: state.scale,
+        startTx: state.tx,
+        startTy: state.ty,
+        startCx: cx,
+        startCy: cy,
+      };
+      img.style.transition = 'none';
+    }
+  };
+
+  const onTouchMove = e => {
+    if(!touch) return;
+
+    if(touch.mode === 'pan' && e.touches.length === 1){
+      const t = e.touches[0];
+      const dx = t.clientX - touch.startX;
+      const dy = t.clientY - touch.startY;
+      if(Math.abs(dx) > 4 || Math.abs(dy) > 4) touch.moved = true;
+      if(state.scale <= 1.001) return;
+      state.tx = touch.startTx + dx;
+      state.ty = touch.startTy + dy;
+      scheduleApply();          // ← 关键
+      e.preventDefault();
+
+    } else if(touch.mode === 'pinch' && e.touches.length === 2){
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const dist = Math.hypot(t1.clientX - t2.clientX,
+                              t1.clientY - t2.clientY);
+      const cx = (t1.clientX + t2.clientX) / 2;
+      const cy = (t1.clientY + t2.clientY) / 2;
+
+      const ratio = dist / Math.max(1, touch.startDist);
+      let newScale = touch.startScale * ratio;
+      newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
+
+      // 用缓存的 wrapLeft/wrapTop，避免 getBoundingClientRect 触发同步 layout
+      const smx = touch.startCx - state.wrapLeft;
+      const smy = touch.startCy - state.wrapTop;
+      const wcx = state.wrapW / 2;
+      const wcy = state.wrapH / 2;
+      const k = newScale / touch.startScale;
+
+      let tx = (smx - wcx) - ((smx - wcx) - touch.startTx) * k;
+      let ty = (smy - wcy) - ((smy - wcy) - touch.startTy) * k;
+      tx += (cx - touch.startCx);
+      ty += (cy - touch.startCy);
+
+      state.scale = newScale;
+      state.tx = tx;
+      state.ty = ty;
+      scheduleApply();          // ← 关键
+      e.preventDefault();
+      showBadge();
+    }
+  };
+
+  const onTouchEnd = e => {
+    if(!touch) return;
+
+    if(touch.mode === 'pan' && !touch.moved && e.touches.length === 0){
+      const now = Date.now();
+      if(now - lastTapTime < DBL_TAP_MS){
+        if(state.scale > 1.001){
+          reset();
+        } else {
+          zoomAt(state.wrapW / 2, state.wrapH / 2, DBL_SCALE);
+        }
+        showBadge();
+        lastTapTime = 0;
+      } else {
+        lastTapTime = now;
+      }
+    }
+
+    if(e.touches.length === 0){
+      touch = null;
+      img.style.transition = '';
+    }
+  };
+
+  wrap.addEventListener('touchstart', onTouchStart, {passive: true});
+  wrap.addEventListener('touchmove',  onTouchMove,  {passive: false});
+  wrap.addEventListener('touchend',   onTouchEnd,   {passive: true});
+  wrap.addEventListener('touchcancel', () => {
+    touch = null;
+    img.style.transition = '';
+  }, {passive: true});
+
+  // =========================================================
+  //  尺寸变化时重新测量（旋转屏幕 / 改窗口大小）
+  // =========================================================
+  let resizeTimer = null;
+  const onResize = () => {
+    if(resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      measure();
+      apply();
+    }, 120);
+  };
+  window.addEventListener('resize', onResize);
+
+  // =========================================================
+  //  清理
+  // =========================================================
+  addBodyCleanup(() => {
+    cancelApply();
+    window.removeEventListener('mousemove', onMouseMove);
+    window.removeEventListener('mouseup', onMouseUp);
+    window.removeEventListener('resize', onResize);
+    if(badgeTimer) clearTimeout(badgeTimer);
+    if(resizeTimer) clearTimeout(resizeTimer);
   });
 }
 
@@ -2275,18 +2826,45 @@ function onPreviewKey(e){
   if(e.key === 'Escape'){
     e.preventDefault();
     closePreview();
+    return;
+  }
+  if(e.key === 'ArrowLeft' && _previewNav.prev){
+    e.preventDefault();
+    openPreview(_previewNav.prev);
+    return;
+  }
+  if(e.key === 'ArrowRight' && _previewNav.next){
+    e.preventDefault();
+    openPreview(_previewNav.next);
   }
 }
 
 function closePreview(){
+  // 先跑 body 级别清理（停视频等）
+  runBodyCleanups();
+
+  // 再跑整个预览级别清理（键盘监听）
   for(const fn of previewCleanupFns){
     try{ fn(); }catch(e){}
   }
   previewCleanupFns = [];
+
   if(previewMaskEl){
     try{ previewMaskEl.remove(); }catch(e){}
     previewMaskEl = null;
   }
+
+  // 清空所有缓存引用
+  _previewModal   = null;
+  _previewBody    = null;
+  _previewTitleEl = null;
+  _previewSubEl   = null;
+  _previewPrevBtn = null;
+  _previewNextBtn = null;
+  _previewDlBtn   = null;
+  _previewFile    = null;
+  _previewNav     = { prev: null, next: null };
+
   document.body.classList.remove('preview-open');
 }
 
@@ -2391,7 +2969,7 @@ async function openQrModal(){
     const r = await fetch('/api/qr.json', {cache: 'no-store'});
     if(!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
-    if(!_qrModalEl) return;               // 用户已关闭
+    if(!_qrModalEl) return;
     qrUrl = j.url || '';
     urlEl.textContent = qrUrl;
     box.innerHTML = j.svg
