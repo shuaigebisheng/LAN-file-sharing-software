@@ -54,6 +54,7 @@ import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 
 from qr import qr_encode, qr_svg
@@ -324,13 +325,9 @@ _CATEGORY_EXT_MAP = {
     "aud": {"mp3","wav","flac","aac","m4a","ogg","opus"},
     "doc": {
         "pdf",
-        # Word
         "doc","docx","docm","dot","dotx","dotm","rtf","odt","ott","fodt",
-        # Excel
         "xls","xlsx","xlsm","xlsb","xltx","xltm","ods","ots","fods",
-        # PowerPoint
         "ppt","pptx","pptm","pps","ppsx","pot","potx","potm","odp","otp","fodp",
-        # 其他文档
         "csv","tsv",
         "txt","md","markdown","log",
         "js","mjs","ts","tsx","jsx","py","rb","go","rs","java","kt","swift",
@@ -359,37 +356,30 @@ def _file_category(name):
 
 # =====================================================================
 #  OOXML 预览（docx / xlsx / pptx 纯 Python 解析 · 兜底）
-#  这些格式本质是 zip + XML，用标准库即可提取文本/表格
 # =====================================================================
 
-# 纯 Python 能解析的 OOXML 后缀（zip + XML）
 _OOXML_EXTS = {"docx", "xlsx", "pptx"}
 
-# 全部 Office 后缀（LibreOffice 能处理的范围）
 _OFFICE_EXTS = {
-    # ---- Word ----
-    "docx", "docm", "dotx", "dotm",     # OOXML
-    "doc",  "dot",  "rtf",               # 旧版二进制 / RTF
-    "odt",  "ott",  "fodt",              # OpenDocument
+    "docx", "docm", "dotx", "dotm",
+    "doc",  "dot",  "rtf",
+    "odt",  "ott",  "fodt",
 
-    # ---- Excel ----
-    "xlsx", "xlsm", "xltx", "xltm",      # OOXML
-    "xls",  "xlsb",                      # 旧版二进制
-    "ods",  "ots",  "fods",              # OpenDocument
+    "xlsx", "xlsm", "xltx", "xltm",
+    "xls",  "xlsb",
+    "ods",  "ots",  "fods",
 
-    # ---- PowerPoint ----
-    "pptx", "pptm", "potx", "potm",      # OOXML
-    "ppt",  "pps",  "ppsx", "pot",       # 旧版二进制
-    "odp",  "otp",  "fodp",              # OpenDocument
+    "pptx", "pptm", "potx", "potm",
+    "ppt",  "pps",  "ppsx", "pot",
+    "odp",  "otp",  "fodp",
 }
-_OOXML_MAX_FILE  = 200 * 1024 * 1024   # 整个文件上限 200MB
-_OOXML_MAX_PART  = 50  * 1024 * 1024   # 单个 XML 部件上限 50MB
-_XLSX_MAX_ROWS   = 500                 # 每张工作表最多渲染行数
-_XLSX_MAX_COLS   = 50                  # 每行最多渲染列数
+_OOXML_MAX_FILE  = 200 * 1024 * 1024
+_OOXML_MAX_PART  = 50  * 1024 * 1024
+_XLSX_MAX_ROWS   = 500
+_XLSX_MAX_COLS   = 50
 
 
 def _xml_local_name(tag):
-    """去掉 XML 命名空间前缀，返回本地名称。"""
     if not isinstance(tag, str):
         return ""
     if tag.startswith("{"):
@@ -399,7 +389,6 @@ def _xml_local_name(tag):
 
 
 def _safe_parse_xml(zf, name, max_size=_OOXML_MAX_PART):
-    """安全地解析 zip 内某个 XML 部件。返回 ElementTree 或 None。"""
     try:
         info = zf.getinfo(name)
     except KeyError:
@@ -412,8 +401,6 @@ def _safe_parse_xml(zf, name, max_size=_OOXML_MAX_PART):
     except (ET.ParseError, OSError, ValueError, EOFError):
         return None
 
-
-# ---------- docx ----------
 
 def _docx_para_text(p):
     parts = []
@@ -486,10 +473,7 @@ def _render_docx(zf):
     return "".join(out) if out else None
 
 
-# ---------- xlsx ----------
-
 def _xlsx_col_index(ref):
-    """从单元格引用（如 'AB12'）解析出 0 起始的列索引。"""
     n = 0
     for ch in ref:
         if "A" <= ch <= "Z":
@@ -531,7 +515,7 @@ def _xlsx_cell_text(cell, shared):
         return "TRUE" if v == "1" else "FALSE"
     if t in ("e", "str"):
         return v
-    return v  # 数字或普通字符串
+    return v
 
 
 def _xlsx_sheet_rows(root, shared):
@@ -564,7 +548,6 @@ def _xlsx_sheet_rows(root, shared):
 
 
 def _render_xlsx(zf):
-    # 共享字符串表
     shared = []
     tree = _safe_parse_xml(zf, "xl/sharedStrings.xml")
     if tree is not None:
@@ -577,7 +560,6 @@ def _render_xlsx(zf):
                     parts.append(n.text)
             shared.append("".join(parts))
 
-    # workbook.xml：工作表名 + rId
     names_by_rid = {}
     tree = _safe_parse_xml(zf, "xl/workbook.xml")
     if tree is not None:
@@ -593,7 +575,6 @@ def _render_xlsx(zf):
             if rid and name:
                 names_by_rid[rid] = name
 
-    # xl/_rels/workbook.xml.rels：rId → 工作表路径
     rid_to_path = {}
     tree = _safe_parse_xml(zf, "xl/_rels/workbook.xml.rels")
     if tree is not None:
@@ -609,14 +590,12 @@ def _render_xlsx(zf):
             path = posixpath.normpath(path)
             rid_to_path[rid] = path
 
-    # 按 workbook 顺序排列
     ordered = []
     for rid, name in names_by_rid.items():
         if rid in rid_to_path:
             ordered.append((name, rid_to_path[rid]))
 
     if not ordered:
-        # 回退：按 sheetN.xml 数字顺序
         cand = []
         for n in zf.namelist():
             if not n.startswith("xl/worksheets/sheet") or not n.endswith(".xml"):
@@ -650,8 +629,6 @@ def _render_xlsx(zf):
         out.append("</table></div>")
     return "".join(out) if out else None
 
-
-# ---------- pptx ----------
 
 def _render_pptx(zf):
     slides = []
@@ -694,14 +671,12 @@ def _render_pptx(zf):
 
 
 def _render_ooxml(full_path, ext):
-    """对外统一入口：返回 HTML 字符串或 None。"""
     try:
         size = os.path.getsize(full_path)
     except OSError:
         return None
     if size > _OOXML_MAX_FILE:
         return None
-    # docx 已由前端 docx-preview 处理，这里不再解析
     if ext == "docx":
         return None
     if not zipfile.is_zipfile(full_path):
@@ -721,13 +696,12 @@ def _render_ooxml(full_path, ext):
 #  LibreOffice：探测 / 转 PDF / 缓存
 # =====================================================================
 
-_SOFFICE_PATH = None        # None = 未探测；"" = 不可用；其他 = 路径
+_SOFFICE_PATH = None
 _SOFFICE_LOCK = threading.Lock()
 _OFFICE_PDF_LOCK = threading.Lock()
 
 
 def _find_soffice():
-    """返回 soffice 可执行文件路径，未找到返回空字符串。"""
     global _SOFFICE_PATH
     with _SOFFICE_LOCK:
         if _SOFFICE_PATH is not None:
@@ -735,12 +709,10 @@ def _find_soffice():
 
         candidates = []
 
-        # 1) 环境变量覆盖
         env = os.environ.get("SOFFICE_PATH")
         if env:
             candidates.append(env)
 
-        # 2) PATH 中查找
         for name in ("soffice", "libreoffice"):
             try:
                 p = shutil.which(name)
@@ -749,7 +721,6 @@ def _find_soffice():
             if p:
                 candidates.append(p)
 
-        # 3) 常见安装位置
         if sys.platform == "win32":
             candidates += [
                 r"C:\Program Files\LibreOffice\program\soffice.exe",
@@ -781,7 +752,6 @@ def _office_pdf_cache_path(name, src_path):
 
 
 def _ensure_office_pdf(name, src_path):
-    """转换并缓存 PDF。成功返回 PDF 路径，失败返回 None。"""
     soffice = _find_soffice()
     if not soffice:
         return None
@@ -846,7 +816,6 @@ def _ensure_office_pdf(name, src_path):
                     push_log(f"[error] 写入 PDF 缓存失败: {e}")
                     return None
         except Exception as e:
-            # 兜底：任何未预期的异常都不影响主流程，只是本次转换失败
             push_log(f"[error] Office → PDF 转换异常: {name} - {e}")
             return None
 
@@ -854,7 +823,6 @@ def _ensure_office_pdf(name, src_path):
 
 
 def _cleanup_office_pdf_cache(max_files=200):
-    """简单清理：缓存文件数超过上限时删掉最旧的一批。"""
     try:
         if not os.path.isdir(OFFICE_PDF_CACHE_DIR):
             return
@@ -905,18 +873,17 @@ def _sanitize_log_text(s):
 
 
 # =====================================================================
-#  回环地址判断（供二维码 host 选择使用）
+#  回环地址判断
 # =====================================================================
 
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", ""}
 
 
 def _is_loopback_host(host):
-    """判断 Host 头是不是回环/本机地址（这类地址不适合编进二维码）。"""
     if not host:
         return True
     h = host.strip()
-    if h.startswith("["):           # IPv6 形如 [::1]:8000
+    if h.startswith("["):
         end = h.find("]")
         if end > 0:
             h = h[1:end]
@@ -971,15 +938,15 @@ def parse_ua(ua):
         return f"{device} · {browser}"
     return device or browser
 
+
 # =====================================================================
-#  设备名（用于在线设备显示）
+#  设备名
 # =====================================================================
 
 _DEVICE_NAME_MAX = 24
 
 
 def _clean_device_name(raw):
-    """清洗用户传来的设备名：去控制字符、截断、去首尾空白。"""
     if not raw:
         return ""
     s = "".join(ch for ch in str(raw) if ch.isprintable() or ch == " ")
@@ -992,18 +959,16 @@ def _clean_device_name(raw):
 
 
 def _short_ip_suffix(ip):
-    """取 IP 尾号（'…23'）。回环 / 空值返回空字符串。"""
     if not ip:
         return ""
     if ip in ("127.0.0.1", "::1", "localhost"):
         return ""
-    if ":" in ip:                       # IPv6
+    if ":" in ip:
         return ip.rsplit(":", 1)[-1]
     return ip.rsplit(".", 1)[-1]
 
 
 def _build_default_name(ua, ip):
-    """没设自定义名时的默认显示名：'Android 手机 · …23'。"""
     base = parse_ua(ua) or ""
     suffix = _short_ip_suffix(ip)
     if not suffix:
@@ -1011,6 +976,7 @@ def _build_default_name(ua, ip):
     if base:
         return f"{base} · …{suffix}"
     return f"设备 · …{suffix}"
+
 
 # =====================================================================
 #  客户端身份（IP 归一化）
@@ -1128,7 +1094,7 @@ def _reset_clients_for_new_network():
 
 
 # =====================================================================
-#  文件元数据（权限 + 完成标记）
+#  文件元数据
 # =====================================================================
 
 META_LOCK = threading.Lock()
@@ -1293,12 +1259,6 @@ _TID = itertools.count(1)
 
 def _new_transfer(direction, name, size, offset, client,
                   client_key_val="", cid=""):
-    """创建或复用传输记录。
-
-    返回 (tid, req_id)：
-      - 上传：req_id 恒为 None（单请求，无需分片聚合）
-      - 下载：req_id 是本次 Range 请求的唯一标识，用于按分片累加进度
-    """
     now = time.time()
     with TRANSFERS_LOCK:
         if direction == "up":
@@ -1322,22 +1282,12 @@ def _new_transfer(direction, name, size, offset, client,
                     old["cid"] = cid
                     return old_tid, None
         else:
-            # 下载：同一客户端 + 同一文件 → 永远复用同一个 tid
-            #
-            # 浏览器下载同一个文件时，可能发出多个请求：
-            #   - 大文件：多个并行 Range 请求 → 复用记录，按分片累加进度
-            #   - 小文件：先探测 / 串行重试 → 前一次已完成，后一次触发
-            #
-            # 若不复用已完成的记录，GUI 会出现两条进度条（旧记录 done 状态
-            # 尚未被 GC，新请求又建了一条）。这里对已完成记录做"复位后复用"，
-            # 让它继续对应同一个下载任务。
             for old_tid, old in list(TRANSFERS.items()):
                 if (old["dir"] == "down"
                         and old["name"] == name
                         and old["size"] == size
                         and old.get("client_key") == client_key_val):
                     if old.get("done") and old.get("ok"):
-                        # 已完成的记录：视为新一次下载，复位状态
                         old["completed_bytes"] = 0
                         old["chunks"] = {}
                         old["received"] = 0
@@ -1383,17 +1333,11 @@ def _new_transfer(direction, name, size, offset, client,
 
 
 def _update_transfer(tid, received, req_id=None):
-    """更新传输进度。
-
-    下载（req_id 非 None）时，received 是"本次分片已发送的字节数"，
-    函数会把它登记到 chunks 里，并用所有分片的总和刷新整体进度。
-    """
     now = time.time()
     with TRANSFERS_LOCK:
         t = TRANSFERS.get(tid)
         if not t:
             return
-        # 已成功完成 → 锁定状态（多请求复用同一 tid 时，避免其他分片回写覆盖）
         if t.get("done") and t.get("ok"):
             return
 
@@ -1419,19 +1363,15 @@ def _pause_transfer(tid, reason=None, req_id=None):
         t = TRANSFERS.get(tid)
         if not t:
             return
-        # 已成功完成 → 不再被覆盖为暂停（多请求复用同一 tid 时的保护）
         if t.get("done") and t.get("ok"):
             return
 
         chunks = t.get("chunks")
         if req_id is not None and chunks is not None and req_id in chunks:
-            # 本次分片已发送的字节永久并入累计值
             t["completed_bytes"] = (t.get("completed_bytes", 0)
                                     + chunks.pop(req_id))
             t["received"] = t["completed_bytes"] + sum(chunks.values())
 
-        # 所有分片都断开后才标记为暂停
-        # （多分片并发时，某个分片被单独掐断不应让整个进度条显示暂停）
         if not chunks:
             t["done"] = False
             t["ok"] = False
@@ -1442,8 +1382,6 @@ def _pause_transfer(tid, reason=None, req_id=None):
 
 
 def _detach_chunk(tid, req_id):
-    """下载分片正常结束：把该分片最终已发送的字节数并入累计值。
-    如果整体进度达到文件大小，标记为完成。"""
     with TRANSFERS_LOCK:
         t = TRANSFERS.get(tid)
         if not t:
@@ -1486,10 +1424,6 @@ def _gc_transfers(max_age=5.0):
             if t["done"] and now - t.get("done_at", t["t0"]) > max_age:
                 del TRANSFERS[tid]
                 continue
-            # 浏览器"暂停"与"取消"在 TCP 层无法区分（都是连接断开）。
-            # 这里保留暂停记录让"暂停"状态能显示出来；
-            # 但如果超过 30 秒还没有恢复（新的 Range 请求会复用记录，
-            # 从而清掉 paused 状态），就认定是"取消"，清理掉避免永久残留。
             if (t["dir"] == "down" and t.get("paused")
                     and now - t.get("paused_at", t["t0"]) > 30.0):
                 del TRANSFERS[tid]
@@ -1537,12 +1471,13 @@ def fmt_bytes(b):
 def fmt_speed(bps):
     return fmt_bytes(bps) + "/s"
 
+
 # =====================================================================
-#  零拷贝文件推送（os.sendfile）
+#  零拷贝文件推送
 # =====================================================================
 
 class _SendfileUnsupported(Exception):
-    """首次 sendfile 调用就失败（平台/对象不支持），用于触发回退。"""
+    pass
 
 
 def _stream_sendfile(sock, f, start, length, on_progress=None):
@@ -1555,7 +1490,6 @@ def _stream_sendfile(sock, f, start, length, on_progress=None):
             continue
         except OSError as e:
             if sent == 0:
-                # 一次都没成功 → 说明平台/对象不支持，交给上层回退
                 raise _SendfileUnsupported() from e
             raise
         if n == 0:
@@ -1581,16 +1515,13 @@ def _stream_read_write(sock, f, start, length, on_progress=None):
 
 
 def stream_file_to_socket(sock, f, start, length, on_progress=None):
-    """
-    把文件 [start, start+length) 区间推给 socket。
-    优先 os.sendfile（零拷贝），首次失败自动回退到 read/write。
-    """
     if hasattr(os, "sendfile"):
         try:
             return _stream_sendfile(sock, f, start, length, on_progress)
         except _SendfileUnsupported:
             pass
     return _stream_read_write(sock, f, start, length, on_progress)
+
 
 # =====================================================================
 #  HTTP
@@ -1600,8 +1531,6 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "FileDrop/2.9"
     protocol_version = "HTTP/1.1"
     timeout = 60
-
-    # ---------- 身份 ----------
 
     def _me(self):
         return client_key(self.client_address[0])
@@ -1621,17 +1550,10 @@ class Handler(BaseHTTPRequestHandler):
         return client_key(self.client_address[0])
 
     def _is_wechat(self):
-        """微信内置浏览器下载行为不可靠（安卓 X5 拦截、iOS 无断点续传），
-        因此对微信 UA 不追踪下载进度，避免服务端出现无意义的进度条。"""
         ua = (self.headers.get("User-Agent", "") if self.headers else "") or ""
         return "MicroMessenger" in ua
 
     def _qr_target_host(self, qs=None):
-        """
-        决定二维码里编码的 host:port。
-        优先级：显式 host 参数 > 请求 Host 头（非回环） > 本机局域网 IP。
-        这样从任意设备打开网页时，生成的二维码都是当前可达的地址。
-        """
         if qs:
             explicit = (qs.get("host") or [""])[0].strip()
             if explicit:
@@ -1648,8 +1570,6 @@ class Handler(BaseHTTPRequestHandler):
 
         ips = get_lan_ips()
         return f"{ips[0]}:{port}" if ips else f"localhost:{port}"
-
-    # ---------- 日志 ----------
 
     def log_message(self, fmt, *args):
         try:
@@ -1700,7 +1620,6 @@ class Handler(BaseHTTPRequestHandler):
             ua = self.headers.get("User-Agent", "") if self.headers else ""
             ip = self.client_address[0]
 
-            # 优先使用前端通过 X-Device-Name 传来的自定义名
             custom = ""
             if self.headers:
                 raw = self.headers.get("X-Device-Name", "") or ""
@@ -1724,8 +1643,6 @@ class Handler(BaseHTTPRequestHandler):
                 TimeoutError):
             self.close_connection = True
 
-    # ---------- 底层发送 ----------
-
     def _send(self, code, body=b"", ctype="text/plain; charset=utf-8", extra=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
@@ -1746,8 +1663,6 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj, ensure_ascii=False),
                    "application/json; charset=utf-8")
-
-    # ---------------- GET ----------------
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -1839,12 +1754,9 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, "Not Found")
 
-    # ---------------- 静态 ----------------
-
     def _serve_static(self, path):
         rel = path[len("/static/"):]
 
-        # 占位图：直接返回内嵌 SVG，不读磁盘
         if rel == "thumb-pending.svg":
             self._send(200, _THUMB_PLACEHOLDER_SVG,
                        "image/svg+xml; charset=utf-8",
@@ -1875,8 +1787,6 @@ class Handler(BaseHTTPRequestHandler):
         }
         ctype = ctype_map.get(ext, "application/octet-stream")
         self._send(200, content, ctype)
-
-    # ---------------- 文件列表（分页 + 过滤 + 排序） ----------------
 
     def _handle_files(self, qs):
         me = self._me()
@@ -2041,8 +1951,6 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
-    # ---------------- 在线设备 ----------------
-
     def _handle_clients(self):
         me = self._me()
         out = []
@@ -2055,8 +1963,6 @@ class Handler(BaseHTTPRequestHandler):
             })
         out.sort(key=lambda x: (not x["is_self"], x["name"]))
         self._json(out)
-
-    # ---------------- OOXML 预览（docx/xlsx/pptx） ----------------
 
     def _handle_ooxml(self, qs):
         name = os.path.basename((qs.get("name") or [""])[0].strip())
@@ -2080,20 +1986,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "无访问权限"}, 403)
             return
 
-        # ---------- 优先：LibreOffice 转 PDF ----------
         if _find_soffice():
             pdf_path = _ensure_office_pdf(name, full)
             if pdf_path:
-                # 顺手做一次轻量 GC
                 _cleanup_office_pdf_cache()
                 self._json({
                     "mode": "pdf",
                     "url": "/api/office-pdf?name=" + urllib.parse.quote(name),
                 })
                 return
-            # 转换失败 → 落到下面的 HTML 兜底
 
-        # ---------- 兜底：纯 Python 解析（仅限 OOXML 系列） ----------
         if ext in _OOXML_EXTS:
             try:
                 html = _render_ooxml(full, ext)
@@ -2105,13 +2007,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"mode": "html", "html": html})
                 return
 
-        # 走到这里说明：
-        # - 没装 LibreOffice（或转换失败）
-        # - 又不是 OOXML 系列
-        # → 只能提示下载
         self._json({"error": "无法预览该文件（请下载后用 Office 打开）"}, 422)
-
-    # ---------------- Office → PDF（流式下载，支持 Range） ----------------
 
     def _handle_office_pdf(self, qs):
         name = os.path.basename((qs.get("name") or [""])[0].strip())
@@ -2145,7 +2041,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, "文件读取失败")
             return
 
-        # 解析 Range（PDF.js 会用）
         range_header = (self.headers.get("Range", "") if self.headers else "") or ""
         start, end = 0, size - 1
         is_range = False
@@ -2212,8 +2107,6 @@ class Handler(BaseHTTPRequestHandler):
                     remaining -= len(chunk)
         except (BrokenPipeError, ConnectionResetError):
             pass
-
-    # ---------------- 下载 ----------------
 
     def _serve_file(self, name, inline=False):
         safe = os.path.basename(name)
@@ -2288,8 +2181,6 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "HEAD":
             return
 
-        # 微信内置浏览器下载行为不可靠（安卓 X5 拦截、iOS 无断点续传），
-        # 对微信 UA 不追踪进度，避免出现无意义的进度条
         tid = None
         req_id = None
         if not inline and not self._is_wechat():
@@ -2297,14 +2188,12 @@ class Handler(BaseHTTPRequestHandler):
                 "down", safe, size, start, self._me_name(),
                 client_key_val=me)
 
-        # 注意：这里传的是"本次分片已发送的字节数"，不是文件里的绝对偏移
         def _on_progress(sent_in_file):
             if tid is not None:
                 _update_transfer(tid, sent_in_file, req_id)
 
         try:
             with open(full, "rb") as f:
-                # wfile 里可能还有缓冲的数据，切到直接写 socket 前先 flush
                 try:
                     self.wfile.flush()
                 except Exception:
@@ -2323,15 +2212,6 @@ class Handler(BaseHTTPRequestHandler):
                 _pause_transfer(tid, str(e), req_id)
 
     def _serve_thumb(self, name):
-        """
-        缩略图端点。
-
-        策略：
-          - 缩略图已生成 → 返回缩略图（JPEG，几 KB），强缓存
-          - 缩略图未生成 + Pillow 可用 → 302 重定向到内嵌占位图，
-            同时后台触发生成；前端识别占位图后会自动重试
-          - 缩略图未生成 + Pillow 不可用 → 回退原图（唯一例外）
-        """
         safe = os.path.basename(name)
         if not safe:
             self._send(404, "Not Found")
@@ -2351,7 +2231,6 @@ class Handler(BaseHTTPRequestHandler):
         thumb = _thumb_path(safe)
 
         if os.path.isfile(thumb):
-            # ---- 缩略图就绪 ----
             full = thumb
             ctype = "image/jpeg"
             cache_control = "public, max-age=86400"
@@ -2360,11 +2239,9 @@ class Handler(BaseHTTPRequestHandler):
             etag = f'W/"{mtime}-{size}"'
 
         else:
-            # ---- 缩略图未就绪 ----
             src_ctype = mimetypes.guess_type(safe)[0] or ""
 
             if _HAS_PIL and src_ctype.startswith("image/"):
-                # 触发后台生成，同时 302 到占位图
                 _generate_thumbnail_async(shared_path, safe)
 
                 self.send_response(302)
@@ -2374,7 +2251,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            # 没 Pillow：只能返回原图
             full = shared_path
             ctype = src_ctype or "application/octet-stream"
             cache_control = "no-cache"
@@ -2409,8 +2285,6 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    # ---------------- /qr ----------------
-
     def _serve_qr_page(self, qs):
         host = self._qr_target_host(qs)
         url = f"http://{host}/"
@@ -2427,7 +2301,6 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, html, "text/html; charset=utf-8")
 
     def _serve_download_page(self, qs):
-        """下载中间页：微信跳浏览器下载时，给用户一个明确的进度提示界面。"""
         name = os.path.basename((qs.get("name") or [""])[0].strip())
         if not name:
             self._send(400, "缺少文件名")
@@ -2457,9 +2330,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, "web/download.html 未找到")
             return
 
-        # 图片文件优先展示缩略图。
-        # 如果缩略图尚未生成且 Pillow 可用，就在本次请求内同步生成一次
-        #（一般 <1s），避免前端反复重试看不到图。
         head_block = None
         if _is_image_file(name):
             thumb_path = _thumb_path(name)
@@ -2501,8 +2371,6 @@ class Handler(BaseHTTPRequestHandler):
         )
         self._send(200, html, "text/html; charset=utf-8")
 
-    # ---------------- 上传状态 ----------------
-
     def _handle_status(self, qs):
         name = os.path.basename((qs.get("name") or [""])[0].strip())
         try:
@@ -2541,8 +2409,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"offset": offset, "complete": False})
         else:
             self._json({"offset": 0, "complete": False})
-
-    # ---------------- 上传 ----------------
 
     def _handle_upload(self, qs):
         name = os.path.basename((qs.get("name") or [""])[0].strip())
@@ -2653,8 +2519,6 @@ class Handler(BaseHTTPRequestHandler):
             _pause_transfer(tid, "部分写入，等待续传")
             self._json({"offset": received, "complete": False, "name": name}, 422)
 
-    # ---------------- 取消上传 ----------------
-
     def _handle_cancel(self):
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -2691,8 +2555,6 @@ class Handler(BaseHTTPRequestHandler):
 
         push_log(f"✗ {self._me_name()} 取消上传 {name}")
         self._json({"ok": True, "name": name, "size": size})
-
-    # ---------------- 多选打包下载 ----------------
 
     def _handle_zip(self):
         try:
@@ -2790,8 +2652,6 @@ class Handler(BaseHTTPRequestHandler):
                 os.remove(tmp_path)
             except OSError:
                 pass
-
-    # ---------------- 修改权限 ----------------
 
     def _handle_permission(self):
         try:
@@ -2895,7 +2755,433 @@ def get_lan_ips():
 
 
 # =====================================================================
-#  GUI
+#  =============  现代化 GUI  =============
+# =====================================================================
+
+# ---------- 配色（与 web/style.css 保持一致） ----------
+C_BG          = "#f5f7fb"
+C_BG_SUB      = "#eef1f7"
+C_CARD        = "#ffffff"
+C_CARD_HOVER  = "#fafbff"
+C_TEXT        = "#0f172a"
+C_TEXT_2      = "#334155"
+C_DIM         = "#64748b"
+C_DIM_2       = "#94a3b8"
+C_BORDER      = "#e6e9f0"
+C_BORDER_2    = "#d8dde7"
+
+C_ACCENT      = "#4f6bff"
+C_ACCENT_2    = "#6f86ff"
+C_ACCENT_HOV  = "#3d55e8"
+C_ACCENT_SOFT = "#eef1ff"
+
+C_SUCCESS     = "#10b981"
+C_SUCCESS_SOFT= "#e6faf2"
+C_WARN        = "#f59e0b"
+C_WARN_SOFT   = "#fdf5e6"
+C_DANGER      = "#ef4444"
+C_DANGER_SOFT = "#fdecec"
+
+
+def _pick_ui_font(root):
+    """选择合适的中文字体，找不到就回退默认。"""
+    try:
+        families = set(tkfont.families(root))
+    except Exception:
+        families = set()
+
+    if sys.platform == "win32":
+        cands = ["Microsoft YaHei UI", "Microsoft YaHei", "SimHei"]
+    elif sys.platform == "darwin":
+        cands = ["PingFang SC", "Hiragino Sans GB", "STHeiti"]
+    else:
+        cands = ["Noto Sans CJK SC", "Source Han Sans SC",
+                 "WenQuanYi Micro Hei", "DejaVu Sans"]
+
+    for f in cands:
+        if f in families:
+            return f
+    return "TkDefaultFont"
+
+
+def _pick_mono_font(root):
+    try:
+        families = set(tkfont.families(root))
+    except Exception:
+        families = set()
+
+    cands = ["JetBrains Mono", "SF Mono", "Menlo", "Consolas",
+             "Cascadia Mono", "DejaVu Sans Mono", "Courier New"]
+    for f in cands:
+        if f in families:
+            return f
+    return "TkFixedFont"
+
+
+def draw_round_rect(canvas, x1, y1, x2, y2, r, **kw):
+    """在 Canvas 上绘制平滑圆角矩形。r 会自动限制在最小边长一半内。"""
+    if r <= 0:
+        return canvas.create_rectangle(x1, y1, x2, y2, **kw)
+
+    w = x2 - x1
+    h = y2 - y1
+    if w <= 0 or h <= 0:
+        return None
+    r = min(r, w / 2, h / 2)
+
+    # 用多边形 + smooth 模拟圆角
+    points = [
+        x1 + r, y1,
+        x2 - r, y1,
+        x2, y1,
+        x2, y1 + r,
+        x2, y2 - r,
+        x2, y2,
+        x2 - r, y2,
+        x1 + r, y2,
+        x1, y2,
+        x1, y2 - r,
+        x1, y1 + r,
+        x1, y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, splinesteps=24, **kw)
+
+
+class Card(tk.Frame):
+    """
+    圆角卡片容器。
+    - 背景用 Canvas 绘制圆角矩形
+    - 内容放在 self.body 里（普通 Frame）
+    - 高度由内容自适应；需要固定高度时由外部 pack/grid 控制
+    """
+
+    def __init__(self, parent, padding=(18, 16, 18, 16),
+                 radius=14, bg=C_BG, card_bg=C_CARD,
+                 border=C_BORDER, **kwargs):
+        super().__init__(parent, bg=bg, **kwargs)
+        self._bg = bg
+        self._card_bg = card_bg
+        self._radius = radius
+        self._border = border
+        self._pad = padding
+
+        self._canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
+        self._canvas.place(x=0, y=0, relwidth=1, relheight=1)
+
+        pl, pt, pr, pb = padding
+        # body 稍微向内缩 1px，让卡片边框可见
+        self.body = tk.Frame(self, bg=card_bg)
+        self.body.pack(fill="both", expand=True,
+                       padx=(pl + 1, pr + 1), pady=(pt + 1, pb + 1))
+
+        self.bind("<Configure>", self._on_resize)
+
+    def _on_resize(self, e):
+        w, h = e.width, e.height
+        if w < 6 or h < 6:
+            return
+        self._canvas.delete("__bg")
+        draw_round_rect(self._canvas, 1, 1, w - 1, h - 1, self._radius,
+                        fill=self._card_bg, outline=self._border, width=1,
+                        tags="__bg")
+
+
+class RoundButton(tk.Canvas):
+    """圆角按钮，支持 hover / press。"""
+
+    def __init__(self, parent, text="", command=None,
+                 bg=C_BG, fill=C_ACCENT, fg="#ffffff",
+                 hover_fill=C_ACCENT_HOV, hover_fg=None,
+                 active_fill=None, active_fg=None,
+                 border=None, radius=8, padx=16, pady=8,
+                 font=None, min_width=0):
+        self._text = text
+        self._fill = fill
+        self._fg = fg
+        self._hover_fill = hover_fill
+        self._hover_fg = hover_fg or fg
+        self._active_fill = active_fill or hover_fill
+        self._active_fg = active_fg or self._hover_fg
+        self._command = command
+        self._radius = radius
+        self._padx = padx
+        self._pady = pady
+        self._font = font
+        self._border = border
+        self._bg = bg
+        self._hovering = False
+        self._pressing = False
+        self._min_width = min_width
+
+        # 计算初始尺寸
+        if self._font is None:
+            self._font = ("TkDefaultFont", 10)
+        try:
+            f = tkfont.Font(font=self._font)
+            tw = f.measure(text) if text else 0
+            th = f.metrics("linespace")
+        except Exception:
+            tw = len(text) * 8
+            th = 16
+
+        w = max(self._min_width, tw + padx * 2)
+        h = th + pady * 2
+
+        super().__init__(parent, width=w, height=h, bg=bg,
+                         highlightthickness=0, bd=0, cursor="hand2")
+
+        self.bind("<Configure>", self._redraw)
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+
+    def set_text(self, text):
+        self._text = text
+        self._redraw()
+
+    def _redraw(self, e=None):
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if w < 4 or h < 4:
+            return
+        self.delete("all")
+
+        if self._pressing:
+            fill = self._active_fill
+            fg = self._active_fg
+        elif self._hovering:
+            fill = self._hover_fill
+            fg = self._hover_fg
+        else:
+            fill = self._fill
+            fg = self._fg
+
+        r = min(self._radius, h // 2)
+        if self._border:
+            draw_round_rect(self, 0.5, 0.5, w - 0.5, h - 0.5, r,
+                            fill=fill, outline=self._border, width=1)
+        else:
+            draw_round_rect(self, 0, 0, w, h, r, fill=fill, outline="")
+        self.create_text(w / 2, h / 2, text=self._text,
+                         fill=fg, font=self._font)
+
+    def _on_press(self, e):
+        self._pressing = True
+        self._redraw()
+
+    def _on_release(self, e):
+        self._pressing = False
+        self._redraw()
+        if self._command and 0 <= e.x <= self.winfo_width() \
+                and 0 <= e.y <= self.winfo_height():
+            self._command()
+
+    def _on_enter(self, e):
+        self._hovering = True
+        self._redraw()
+
+    def _on_leave(self, e):
+        self._hovering = False
+        self._pressing = False
+        self._redraw()
+
+
+class ModernProgressBar(tk.Canvas):
+    """圆角、细线条的现代进度条。"""
+
+    def __init__(self, parent, height=6, bg=C_CARD,
+                 fill=C_ACCENT, track=C_BORDER, radius=3):
+        super().__init__(parent, height=height, bg=bg,
+                         highlightthickness=0, bd=0)
+        self._fill = fill
+        self._track = track
+        self._radius = radius
+        self._value = 0.0
+        self.bind("<Configure>", self._redraw)
+
+    def set(self, value):
+        value = max(0.0, min(100.0, value))
+        if abs(value - self._value) < 0.5:
+            return
+        self._value = value
+        self._redraw()
+
+    def set_color(self, color):
+        if color != self._fill:
+            self._fill = color
+            self._redraw()
+
+    def _redraw(self, e=None):
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if w < 4 or h < 4:
+            return
+        self.delete("all")
+        r = min(self._radius, h // 2)
+        draw_round_rect(self, 0, 0, w, h, r, fill=self._track, outline="")
+        fw = w * (self._value / 100.0)
+        if fw > 0:
+            # 极小时画成小圆头，视觉更干净
+            if fw < 2 * r:
+                self.create_oval(0, 0, 2 * r, h, fill=self._fill, outline="")
+            else:
+                draw_round_rect(self, 0, 0, fw, h, r,
+                                fill=self._fill, outline="")
+
+
+class _Badge(tk.Canvas):
+    """小圆角数字徽章。"""
+
+    def __init__(self, parent, bg=C_CARD, fill=C_ACCENT_SOFT,
+                 fg=C_ACCENT, font=None, padx=8, radius=10):
+        self._fill = fill
+        self._fg = fg
+        self._text = ""
+        self._font = font or ("TkDefaultFont", 9, "bold")
+        self._padx = padx
+        self._radius = radius
+        self._bg = bg
+        super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
+                         height=20, width=10)
+        self.bind("<Configure>", self._redraw)
+
+    def set(self, text):
+        text = str(text)
+        if text == self._text:
+            return
+        self._text = text
+        # 根据文字更新请求宽度
+        try:
+            f = tkfont.Font(font=self._font)
+            tw = f.measure(text) if text else 0
+        except Exception:
+            tw = len(text) * 7
+        self.configure(width=max(20, tw + self._padx * 2 + 4))
+        self._redraw()
+
+    def _redraw(self, e=None):
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if w < 4 or h < 4:
+            return
+        self.delete("all")
+        r = min(self._radius, h // 2)
+        draw_round_rect(self, 0, 0, w, h, r, fill=self._fill, outline="")
+        self.create_text(w / 2, h / 2, text=self._text,
+                         fill=self._fg, font=self._font)
+
+
+class _DeviceRow(tk.Frame):
+    """在线设备一行。"""
+
+    def __init__(self, parent, name, ip, is_self=False, font=None):
+        super().__init__(parent, bg=C_CARD)
+        dot = tk.Label(self, text="●", bg=C_CARD,
+                        fg=C_SUCCESS, font=(font, 9) if font else ("TkDefaultFont", 9))
+        dot.pack(side="left", padx=(0, 8))
+
+        text = name + ("（本机）" if is_self else "")
+        name_lbl = tk.Label(self, text=text, bg=C_CARD, fg=C_TEXT_2,
+                             font=(font or "TkDefaultFont", 10, "bold"),
+                             anchor="w")
+        name_lbl.pack(side="left")
+
+        if ip:
+            ip_lbl = tk.Label(self, text=ip, bg=C_CARD, fg=C_DIM_2,
+                                font=(font or "TkDefaultFont", 9),
+                                anchor="e")
+            ip_lbl.pack(side="right")
+
+
+class _TransferRow(tk.Frame):
+    """正在传输的一行。"""
+
+    def __init__(self, parent, font=None, mono_font=None):
+        super().__init__(parent, bg=C_CARD)
+        self._font = font or "TkDefaultFont"
+        self._mono = mono_font or "TkFixedFont"
+
+        # 顶行：箭头 + 文件名 + 关闭
+        top = tk.Frame(self, bg=C_CARD)
+        top.pack(fill="x")
+
+        self.arrow = tk.Label(top, text="⬆", bg=C_CARD, fg=C_ACCENT,
+                               font=(self._font, 11, "bold"))
+        self.arrow.pack(side="left", padx=(0, 6))
+
+        self.name_lbl = tk.Label(top, text="", bg=C_CARD, fg=C_TEXT,
+                                  font=(self._font, 10), anchor="w",
+                                  justify="left")
+        self.name_lbl.pack(side="left", fill="x", expand=True)
+
+        self.close_btn = tk.Label(top, text="✕", bg=C_CARD, fg=C_DIM_2,
+                                   font=(self._font, 10), cursor="hand2",
+                                   padx=4)
+        self.close_btn.pack(side="right")
+        self.close_btn.bind("<Enter>",
+                             lambda e: self.close_btn.configure(fg=C_DANGER))
+        self.close_btn.bind("<Leave>",
+                             lambda e: self.close_btn.configure(fg=C_DIM_2))
+
+        # 进度条
+        self.bar = ModernProgressBar(self, height=6, bg=C_CARD)
+        self.bar.pack(fill="x", pady=(6, 4))
+
+        # 底行：状态
+        self.status_lbl = tk.Label(self, text="", bg=C_CARD, fg=C_DIM,
+                                    font=(self._mono, 9), anchor="w")
+        self.status_lbl.pack(fill="x")
+
+    def set_close_handler(self, fn):
+        self.close_btn.bind("<Button-1>", lambda e: fn())
+
+    def update(self, t, fmt_bytes_fn, fmt_speed_fn):
+        arrow = "⬆" if t["dir"] == "up" else "⬇"
+        name = t["name"]
+        if len(name) > 40:
+            name = name[:18] + "…" + name[-19:]
+        if self.name_lbl.cget("text") != name:
+            self.name_lbl.configure(text=name)
+        if self.arrow.cget("text") != arrow:
+            self.arrow.configure(text=arrow)
+
+        pct = (t["received"] / max(t["size"], 1)) * 100
+        self.bar.set(pct)
+
+        if t.get("paused"):
+            status = f"⏸ 已暂停 · {fmt_bytes_fn(t['received'])} / {fmt_bytes_fn(t['size'])}"
+            color = C_WARN
+            bar_color = C_WARN
+        elif t["done"]:
+            if t["ok"]:
+                status = f"✓ 完成 · {fmt_bytes_fn(t['size'])}"
+                color = C_SUCCESS
+                bar_color = C_SUCCESS
+            else:
+                status = f"✗ 失败 · {t.get('error') or ''}"
+                color = C_DANGER
+                bar_color = C_DANGER
+        else:
+            sp = t.get("speed", 0.0)
+            if sp > 1000:
+                remain = (t["size"] - t["received"]) / sp
+                status = (f"{pct:.0f}%  ·  {fmt_speed_fn(sp)}  ·  "
+                          f"剩余 {int(remain)}s  ·  "
+                          f"{fmt_bytes_fn(t['received'])} / {fmt_bytes_fn(t['size'])}")
+            else:
+                status = (f"{pct:.0f}%  ·  "
+                          f"{fmt_bytes_fn(t['received'])} / {fmt_bytes_fn(t['size'])}")
+            color = C_DIM
+            bar_color = C_ACCENT
+
+        if self.status_lbl.cget("text") != status:
+            self.status_lbl.configure(text=status, fg=color)
+        self.bar.set_color(bar_color)
+
+
+# =====================================================================
+#  主 App（GUI）
 # =====================================================================
 
 class App:
@@ -2907,13 +3193,21 @@ class App:
         self.last_ips = None
         self.last_log_id = 0
         self._last_client_key = None
-        self._transfer_rows = {}
+        self._transfer_rows = {}   # tid -> _TransferRow
         self._transfer_empty = None
         self._transfer_order = None
+        self._qr_key = None
+        self._clients_widgets = []
+        self._current_url = ""
+
+        # 字体
+        self.FONT_UI = _pick_ui_font(root)
+        self.FONT_MONO = _pick_mono_font(root)
 
         root.title("局域网互传")
-        root.geometry("980x700")
-        root.minsize(840, 580)
+        root.geometry("1060x760")
+        root.minsize(900, 620)
+        root.configure(bg=C_BG)
 
         self._build_ui()
         self._start_server()
@@ -2922,103 +3216,282 @@ class App:
         self._poll()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    # ------------------------------------------------------------------
+    #  整体布局
+    # ------------------------------------------------------------------
+
     def _build_ui(self):
-        style = ttk.Style()
-        try:
-            style.theme_use("vista" if sys.platform == "win32" else "clam")
-        except tk.TclError:
-            pass
+        F_UI = self.FONT_UI
 
-        top = ttk.Frame(self.root, padding=(18, 14, 18, 6))
-        top.pack(fill="x")
+        # ---------- 顶部栏 ----------
+        header = tk.Frame(self.root, bg=C_BG)
+        header.pack(fill="x", padx=22, pady=(18, 6))
 
-        ttk.Label(top, text="局域网互传",
-                  font=("", 15, "bold")).pack(side="left")
+        # 左侧：Logo + 标题
+        left_box = tk.Frame(header, bg=C_BG)
+        left_box.pack(side="left", fill="y")
 
-        self.status_var = tk.StringVar(value="● 运行中")
-        self.status_label = ttk.Label(top, textvariable=self.status_var,
-                                       foreground="#16a34a",
-                                       font=("", 10, "bold"))
-        self.status_label.pack(side="left", padx=(14, 0))
+        logo = tk.Canvas(left_box, width=46, height=46, bg=C_BG,
+                          highlightthickness=0, bd=0)
+        logo.pack(side="left", padx=(0, 12))
+        self._draw_logo(logo)
 
-        self.info_var = tk.StringVar(value="")
-        ttk.Label(top, textvariable=self.info_var,
-                  foreground="#6b7280",
-                  font=("", 9)).pack(side="right")
+        title_box = tk.Frame(left_box, bg=C_BG)
+        title_box.pack(side="left", fill="y", pady=(2, 0))
 
-        ttk.Separator(self.root, orient="horizontal").pack(fill="x",
-                                                            padx=18,
-                                                            pady=(0, 8))
+        tk.Label(title_box, text="局域网互传", bg=C_BG, fg=C_TEXT,
+                 font=(F_UI, 17, "bold"), anchor="w").pack(anchor="w")
 
-        main = ttk.Frame(self.root, padding=(18, 6, 18, 6))
-        main.pack(fill="both", expand=True)
-        main.columnconfigure(0, weight=0, minsize=270)
-        main.columnconfigure(1, weight=1)
-        main.rowconfigure(0, weight=1)
+        self.status_lbl = tk.Label(
+            title_box, text="● 运行中", bg=C_BG, fg=C_SUCCESS,
+            font=(F_UI, 10), anchor="w")
+        self.status_lbl.pack(anchor="w", pady=(2, 0))
 
-        left = ttk.LabelFrame(main, text="扫码连接", padding=14)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        # 右侧：共享目录 + 按钮
+        right_box = tk.Frame(header, bg=C_BG)
+        right_box.pack(side="right", fill="y")
 
-        self.qr_canvas = tk.Canvas(left, width=240, height=240,
-                                    bg="#ffffff", highlightthickness=0, bd=0)
-        self.qr_canvas.pack(anchor="n")
+        path_box = tk.Frame(right_box, bg=C_BG)
+        path_box.pack(side="left", padx=(0, 12), pady=(2, 0))
+        tk.Label(path_box, text="共享目录", bg=C_BG, fg=C_DIM_2,
+                 font=(F_UI, 9), anchor="e").pack(anchor="e")
+        self.path_lbl = tk.Label(path_box, text="", bg=C_BG, fg=C_TEXT_2,
+                                  font=(F_UI, 10), anchor="e")
+        self.path_lbl.pack(anchor="e")
 
-        self.qr_hint = ttk.Label(left, text="正在获取 IP…",
-                                  foreground="#6b7280",
-                                  wraplength=240, justify="center",
-                                  font=("", 9))
-        self.qr_hint.pack(pady=(10, 0))
+        self.btn_open = RoundButton(
+            right_box, text="打开文件夹", command=self._open_folder,
+            bg=C_BG, fill=C_CARD, fg=C_TEXT_2,
+            hover_fill=C_ACCENT_SOFT, hover_fg=C_ACCENT,
+            border=C_BORDER_2, radius=8, padx=14, pady=7,
+            font=(F_UI, 10),
+        )
+        self.btn_open.pack(side="right", padx=(0, 8))
 
-        right = ttk.Frame(main)
+        self.btn_change = RoundButton(
+            right_box, text="更改目录",
+            command=self._choose_folder,
+            bg=C_BG, fill=C_ACCENT, fg="#ffffff",
+            hover_fill=C_ACCENT_HOV,
+            radius=8, padx=14, pady=7,
+            font=(F_UI, 10),
+        )
+        self.btn_change.pack(side="right")
+
+        # ---------- 分隔线 ----------
+        sep = tk.Frame(self.root, bg=C_BORDER, height=1)
+        sep.pack(fill="x", padx=22, pady=(6, 0))
+
+        # ---------- 主体 ----------
+        body = tk.Frame(self.root, bg=C_BG)
+        body.pack(fill="both", expand=True, padx=22, pady=18)
+
+        body.columnconfigure(0, weight=0, minsize=300)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        left = tk.Frame(body, bg=C_BG)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+
+        right = tk.Frame(body, bg=C_BG)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(4, weight=1)
+        right.rowconfigure(2, weight=1)
 
-        clients_box = ttk.LabelFrame(right, text="在线设备", padding=10)
-        clients_box.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        self.clients_frame = ttk.Frame(clients_box)
-        self.clients_frame.pack(fill="x")
-        self._clients_widgets = []
+        self._build_left_column(left)
+        self._build_right_column(right)
 
-        urls_box = ttk.LabelFrame(right, text="访问地址（点击复制）", padding=12)
-        urls_box.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        self.urls_frame = ttk.Frame(urls_box)
-        self.urls_frame.pack(fill="x")
+    # ------------------------------------------------------------------
+    #  Logo（闪电图标）
+    # ------------------------------------------------------------------
 
-        btns = ttk.Frame(right)
-        btns.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        ttk.Button(btns, text="打开共享文件夹",
-                   command=self._open_folder).pack(side="left")
-        ttk.Button(btns, text="更改共享目录…",
-                   command=self._choose_folder).pack(side="left", padx=(8, 0))
+    def _draw_logo(self, canvas):
+        c = canvas
+        draw_round_rect(c, 1, 1, 45, 45, 13,
+                        fill=C_ACCENT, outline="")
+        draw_round_rect(c, 2, 2, 44, 20, 12,
+                        fill="#6f86ff", outline="")
+        c.create_polygon(
+            24, 8, 16, 24, 22, 24, 20, 38, 30, 22, 23, 22, 27, 8,
+            fill="#ffffff", outline="")
 
-        transfers_box = ttk.LabelFrame(right, text="正在传输", padding=10)
-        transfers_box.grid(row=3, column=0, sticky="ew", pady=(0, 10))
-        self.transfers_frame = ttk.Frame(transfers_box)
-        self.transfers_frame.pack(fill="x")
-        self.transfers_frame.columnconfigure(0, weight=1)
+    # ------------------------------------------------------------------
+    #  左栏：二维码卡片
+    # ------------------------------------------------------------------
 
-        logs_box = ttk.LabelFrame(right, text="活动日志", padding=8)
-        logs_box.grid(row=4, column=0, sticky="nsew")
-        logs_box.columnconfigure(0, weight=1)
-        logs_box.rowconfigure(0, weight=1)
+    def _build_left_column(self, parent):
+        F_UI = self.FONT_UI
+
+        # ---- 二维码卡片 ----
+        qr_card = Card(parent, padding=(18, 16, 18, 18),
+                       bg=C_BG, card_bg=C_CARD, radius=14)
+        qr_card.pack(fill="x")
+
+        tk.Label(qr_card.body, text="扫码连接", bg=C_CARD, fg=C_TEXT,
+                 font=(F_UI, 13, "bold"), anchor="w").pack(fill="x")
+        tk.Label(qr_card.body, text="用手机扫码即可访问",
+                 bg=C_CARD, fg=C_DIM, font=(F_UI, 9),
+                 anchor="w").pack(fill="x", pady=(2, 12))
+
+        # QR Canvas —— 用白色卡片包裹
+        qr_wrap = tk.Frame(qr_card.body, bg=C_CARD)
+        qr_wrap.pack(fill="x")
+
+        self.qr_canvas = tk.Canvas(
+            qr_wrap, width=240, height=240, bg="#ffffff",
+            highlightthickness=0, bd=0)
+        self.qr_canvas.pack(anchor="center")
+
+        # 合并后的地址 Label
+        self.qr_url_label = tk.Label(
+            qr_card.body, text="正在获取 IP…",
+            bg=C_CARD, fg=C_DIM, font=(F_UI, 10),
+            cursor="hand2", justify="center"
+        )
+        self.qr_url_label.pack(pady=(12, 0))
+        self.qr_url_label.bind("<Button-1>", self._on_url_clicked)
+        self.qr_url_label.bind("<Enter>", lambda e: self._on_url_hover(True))
+        self.qr_url_label.bind("<Leave>", lambda e: self._on_url_hover(False))
+
+    # ------------------------------------------------------------------
+    #  右栏：在线设备 / 正在传输 / 活动日志
+    # ------------------------------------------------------------------
+
+    def _build_right_column(self, parent):
+        F_UI = self.FONT_UI
+
+        # ---- 在线设备 ----
+        dev_card = Card(parent, padding=(18, 16, 18, 16),
+                        bg=C_BG, card_bg=C_CARD, radius=14)
+        dev_card.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+
+        head1 = tk.Frame(dev_card.body, bg=C_CARD)
+        head1.pack(fill="x")
+
+        tk.Label(head1, text="在线设备", bg=C_CARD, fg=C_TEXT,
+                 font=(F_UI, 13, "bold")).pack(side="left")
+
+        self.dev_count = _Badge(head1, bg=C_CARD,
+                                 font=(F_UI, 9, "bold"))
+        self.dev_count.pack(side="right")
+
+        self.devices_frame = tk.Frame(dev_card.body, bg=C_CARD)
+        self.devices_frame.pack(fill="x", pady=(8, 0))
+
+        self._empty_dev_lbl = tk.Label(
+            self.devices_frame, text="暂无设备连接",
+            bg=C_CARD, fg=C_DIM_2, font=(F_UI, 10), anchor="w")
+        self._empty_dev_lbl.pack(anchor="w", pady=2)
+
+        # ---- 正在传输 ----
+        tr_card = Card(parent, padding=(18, 16, 18, 16),
+                       bg=C_BG, card_bg=C_CARD, radius=14)
+        tr_card.grid(row=1, column=0, sticky="ew", pady=(0, 14))
+
+        head2 = tk.Frame(tr_card.body, bg=C_CARD)
+        head2.pack(fill="x")
+
+        tk.Label(head2, text="正在传输", bg=C_CARD, fg=C_TEXT,
+                 font=(F_UI, 13, "bold")).pack(side="left")
+
+        self._clear_done_btn = tk.Label(
+            head2, text="清除已完成", bg=C_CARD, fg=C_DIM_2,
+            font=(F_UI, 9), cursor="hand2")
+        self._clear_done_btn.pack(side="right")
+        self._clear_done_btn.bind("<Button-1>",
+                                    lambda e: self._clear_done_transfers())
+        self._clear_done_btn.bind(
+            "<Enter>", lambda e: self._clear_done_btn.configure(fg=C_ACCENT))
+        self._clear_done_btn.bind(
+            "<Leave>", lambda e: self._clear_done_btn.configure(fg=C_DIM_2))
+
+        self.transfers_frame = tk.Frame(tr_card.body, bg=C_CARD)
+        self.transfers_frame.pack(fill="x", pady=(8, 0))
+
+        self._empty_transfer_lbl = tk.Label(
+            self.transfers_frame, text="空闲",
+            bg=C_CARD, fg=C_DIM_2, font=(F_UI, 10), anchor="w")
+        self._empty_transfer_lbl.pack(anchor="w", pady=2)
+
+        # ---- 活动日志 ----
+        log_card = Card(parent, padding=(18, 16, 18, 16),
+                        bg=C_BG, card_bg=C_CARD, radius=14)
+        log_card.grid(row=2, column=0, sticky="nsew")
+
+        head3 = tk.Frame(log_card.body, bg=C_CARD)
+        head3.pack(fill="x")
+
+        tk.Label(head3, text="活动日志", bg=C_CARD, fg=C_TEXT,
+                 font=(F_UI, 13, "bold")).pack(side="left")
+
+        self._clear_log_btn = tk.Label(
+            head3, text="清空", bg=C_CARD, fg=C_DIM_2,
+            font=(F_UI, 9), cursor="hand2")
+        self._clear_log_btn.pack(side="right")
+        self._clear_log_btn.bind("<Button-1>",
+                                    lambda e: self._clear_logs())
+        self._clear_log_btn.bind(
+            "<Enter>", lambda e: self._clear_log_btn.configure(fg=C_ACCENT))
+        self._clear_log_btn.bind(
+            "<Leave>", lambda e: self._clear_log_btn.configure(fg=C_DIM_2))
+
+        # Text + 滚动条
+        log_wrap = tk.Frame(log_card.body, bg=C_CARD)
+        log_wrap.pack(fill="both", expand=True, pady=(8, 0))
+        log_wrap.columnconfigure(0, weight=1)
+        log_wrap.rowconfigure(0, weight=1)
 
         self.logs_text = tk.Text(
-            logs_box, height=8, wrap="word",
-            font=("Consolas", 9) if sys.platform == "win32" else ("Menlo", 10),
-            bg="#fafafa", fg="#333", relief="flat", bd=0,
-            padx=8, pady=6, state="disabled",
+            log_wrap,
+            wrap="word",
+            font=(self.FONT_MONO, 9),
+            bg=C_CARD, fg=C_TEXT_2,
+            relief="flat", bd=0,
+            padx=2, pady=2,
+            state="disabled",
+            insertbackground=C_ACCENT,
+            selectbackground=C_ACCENT_SOFT,
+            selectforeground=C_TEXT,
+            spacing1=2, spacing3=2,
         )
         self.logs_text.grid(row=0, column=0, sticky="nsew")
 
-        sb = ttk.Scrollbar(logs_box, orient="vertical",
-                            command=self.logs_text.yview)
-        sb.grid(row=0, column=1, sticky="ns")
-        self.logs_text.configure(yscrollcommand=sb.set)
+        sb_style = ttk.Style()
+        try:
+            sb_style.theme_use("clam")
+        except Exception:
+            pass
+        try:
+            sb_style.configure(
+                "Modern.Vertical.TScrollbar",
+                background=C_CARD, troughcolor=C_CARD,
+                bordercolor=C_CARD, arrowcolor=C_DIM_2,
+                lightcolor=C_CARD, darkcolor=C_CARD,
+                gripcount=0, relief="flat", borderwidth=0,
+            )
+            self._sb = ttk.Scrollbar(
+                log_wrap, orient="vertical",
+                command=self.logs_text.yview,
+                style="Modern.Vertical.TScrollbar",
+            )
+        except Exception:
+            self._sb = ttk.Scrollbar(
+                log_wrap, orient="vertical", command=self.logs_text.yview)
+        self._sb.grid(row=0, column=1, sticky="ns", padx=(6, 0))
+        self.logs_text.configure(yscrollcommand=self._sb.set)
 
-        self.logs_text.tag_configure("time", foreground="#9ca3af")
-        self.logs_text.tag_configure("ok", foreground="#16a34a")
-        self.logs_text.tag_configure("warn", foreground="#d97706")
+        self.logs_text.tag_configure(
+            "time", foreground=C_DIM_2, font=(self.FONT_MONO, 9))
+        self.logs_text.tag_configure(
+            "ok", foreground=C_SUCCESS, font=(self.FONT_MONO, 9))
+        self.logs_text.tag_configure(
+            "warn", foreground=C_WARN, font=(self.FONT_MONO, 9))
+        self.logs_text.tag_configure(
+            "error", foreground=C_DANGER, font=(self.FONT_MONO, 9))
+
+    # ------------------------------------------------------------------
+    #  服务端启动 / 停止
+    # ------------------------------------------------------------------
 
     def _start_server(self):
         os.makedirs(SHARED_DIR, exist_ok=True)
@@ -3048,7 +3521,6 @@ class App:
         else:
             push_log("⚠️ 未检测到 Pillow，图片缩略图将使用原图")
 
-        # 探测 LibreOffice，尽早把结果写进日志
         try:
             _find_soffice()
         except Exception:
@@ -3060,6 +3532,10 @@ class App:
             self.httpd.server_close()
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    #  后台 IP 变化监听
+    # ------------------------------------------------------------------
 
     def _ip_watcher(self):
         if not hasattr(self, "_last_known_ips"):
@@ -3092,6 +3568,10 @@ class App:
             if self.stop_event.wait(3):
                 break
 
+    # ------------------------------------------------------------------
+    #  主刷新循环
+    # ------------------------------------------------------------------
+
     def _poll(self):
         if self.stop_event.is_set():
             return
@@ -3104,28 +3584,108 @@ class App:
 
     def _update_header(self):
         p = SHARED_DIR
-        if len(p) > 60:
-            p = "…" + p[-57:]
-        self.info_var.set(p)
+        if len(p) > 50:
+            p = "…" + p[-47:]
+        if self.path_lbl.cget("text") != p:
+            self.path_lbl.configure(text=p)
+
+    # ------------------------------------------------------------------
+    #  二维码 / 地址列表
+    # ------------------------------------------------------------------
+
+    def _refresh_info(self):
+        ips = self.last_ips or []
+        key = "|".join(ips)
+
+        if self._qr_key != key:
+            self._qr_key = key
+            self._draw_qr(ips)
+
+    def _draw_qr(self, ips):
+        c = self.qr_canvas
+        c.delete("all")
+        if not ips:
+            c.create_text(120, 110, text="⚠️", font=(self.FONT_UI, 30),
+                          fill=C_WARN)
+            c.create_text(120, 150, text="未检测到局域网 IP",
+                          font=(self.FONT_UI, 10), fill=C_DIM)
+            c.create_text(120, 172, text="请连接局域网",
+                          font=(self.FONT_UI, 9), fill=C_DIM_2)
+            self.qr_url_label.configure(text="等待网络连接…", fg=C_DIM)
+            self._current_url = ""
+            return
+        url = f"http://{ips[0]}:{self.port}/"
+        self._current_url = url
+
+        try:
+            matrix = qr_encode(url)
+        except Exception as e:
+            c.create_text(120, 120, text=f"二维码生成失败\n{e}",
+                          font=(self.FONT_UI, 9), fill=C_DANGER)
+            self.qr_url_label.configure(text="生成失败", fg=C_DANGER)
+            self._current_url = ""
+            return
+        n = len(matrix)
+        quiet = 2
+        total = n + 2 * quiet
+        size = 240
+        cell = size / total
+        for y in range(n):
+            for x in range(n):
+                if matrix[y][x]:
+                    x0 = (x + quiet) * cell
+                    y0 = (y + quiet) * cell
+                    c.create_rectangle(x0, y0,
+                                        x0 + cell + 0.5, y0 + cell + 0.5,
+                                        fill="#000000", outline="#000000")
+        
+        # 更新文字，取消 wraplength 避免换行
+        self.qr_url_label.configure(
+            text=url, fg=C_ACCENT, 
+            font=(self.FONT_MONO, 10)
+        )
+
+    def _on_url_hover(self, hovering):
+        if not self._current_url:
+            return
+        if hovering:
+            self.qr_url_label.configure(fg=C_ACCENT_HOV)
+        else:
+            self.qr_url_label.configure(fg=C_ACCENT)
+
+    def _on_url_clicked(self, e):
+        if not self._current_url:
+            return
+        # 1. 复制
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self._current_url)
+            self._flash_status("✓ 已复制地址并打开")
+        except tk.TclError:
+            pass
+        # 2. 打开浏览器
+        try:
+            webbrowser.open(self._current_url)
+        except Exception:
+            pass
+
+    def _flash_status(self, text):
+        self.status_lbl.configure(text=text, fg=C_ACCENT)
+        self.root.after(2000, lambda: self.status_lbl.configure(
+            text="● 运行中", fg=C_SUCCESS))
+
+    # ------------------------------------------------------------------
+    #  在线设备列表
+    # ------------------------------------------------------------------
 
     def _refresh_clients(self):
         clients = get_active_clients()
 
-        rows = []
-        seen = {}
-        for c in clients:
-            is_self = c["key"] == _LOCAL_KEY
-            label = c["name"] or c["ip"]
-            if is_self:
-                label = label + "（本机）"
-            if label in seen:
-                seen[label] += 1
-                label = f"{label} ({seen[label]})"
-            else:
-                seen[label] = 1
-            rows.append((c["ip"], label))
+        # 排序：本机在前
+        clients.sort(key=lambda c: (c["key"] != _LOCAL_KEY, c["name"]))
 
-        key = tuple((ip, label) for ip, label in rows)
+        key = tuple((c["ip"], c["name"], c["key"] == _LOCAL_KEY)
+                    for c in clients)
         if key == self._last_client_key:
             return
         self._last_client_key = key
@@ -3137,48 +3697,31 @@ class App:
                 pass
         self._clients_widgets.clear()
 
-        if not rows:
-            lbl = ttk.Label(self.clients_frame, text="暂无设备连接",
-                            foreground="#9ca3af", font=("", 9))
-            lbl.pack(anchor="w")
-            self._clients_widgets.append(lbl)
-            return
+        # 隐藏空状态
+        if self._empty_dev_lbl.winfo_exists():
+            self._empty_dev_lbl.pack_forget()
 
-        for ip, label in rows:
-            row = ttk.Frame(self.clients_frame)
-            row.pack(fill="x", pady=1)
-            dot = ttk.Label(row, text="●", foreground="#16a34a", font=("", 9))
-            dot.pack(side="left", padx=(0, 6))
-            name_lbl = ttk.Label(row, text=label, font=("", 9, "bold"))
-            name_lbl.pack(side="left")
-            ip_lbl = ttk.Label(row, text=f"  {ip}", foreground="#9ca3af",
-                                font=("Consolas", 8))
-            ip_lbl.pack(side="left")
-            self._clients_widgets.extend([row, dot, name_lbl, ip_lbl])
+        for c in clients:
+            is_self = c["key"] == _LOCAL_KEY
+            row = _DeviceRow(self.devices_frame, c["name"], c["ip"],
+                              is_self=is_self, font=self.FONT_UI)
+            row.pack(fill="x", pady=2)
+            self._clients_widgets.append(row)
 
-    def _refresh_info(self):
-        ips = self.last_ips or []
-        key = "|".join(ips)
+        if not clients:
+            if not self._empty_dev_lbl.winfo_exists():
+                self._empty_dev_lbl = tk.Label(
+                    self.devices_frame, text="暂无设备连接",
+                    bg=C_CARD, fg=C_DIM_2,
+                    font=(self.FONT_UI, 10), anchor="w")
+            self._empty_dev_lbl.pack(anchor="w", pady=2)
 
-        if getattr(self, "_qr_key", None) != key:
-            self._qr_key = key
-            self._draw_qr(ips)
+        # 更新 badge
+        self.dev_count.set(str(len(clients)))
 
-        if getattr(self, "_urls_key", None) != key:
-            self._urls_key = key
-            for w in self.urls_frame.winfo_children():
-                w.destroy()
-            if not ips:
-                ttk.Label(self.urls_frame, text="未检测到局域网 IP",
-                          foreground="#d97706").pack(anchor="w")
-            else:
-                for ip in ips:
-                    url = f"http://{ip}:{self.port}/"
-                    btn = tk.Label(self.urls_frame, text=url,
-                                   fg="#2563eb", cursor="hand2",
-                                   font=("Consolas", 10), anchor="w")
-                    btn.pack(fill="x", pady=2)
-                    btn.bind("<Button-1>", lambda e, u=url: self._copy_url(u))
+    # ------------------------------------------------------------------
+    #  传输列表
+    # ------------------------------------------------------------------
 
     def _refresh_transfers(self):
         _gc_transfers(5.0)
@@ -3195,128 +3738,65 @@ class App:
         items.sort(key=lambda x: (sort_key(x), x["t0"]))
         items = items[:8]
 
-        current_ids = {t["id"] for t in items}
+        current_ids = [t["id"] for t in items]
+        current_id_set = set(current_ids)
+
+        # 移除消失的行
         for tid in list(self._transfer_rows.keys()):
-            if tid not in current_ids:
-                widgets = self._transfer_rows.pop(tid)
+            if tid not in current_id_set:
+                row = self._transfer_rows.pop(tid)
                 try:
-                    widgets["frame"].destroy()
+                    row.destroy()
                 except tk.TclError:
                     pass
 
+        # 隐藏/显示空状态
+        if items:
+            if self._empty_transfer_lbl.winfo_exists() \
+                    and self._empty_transfer_lbl.winfo_ismapped():
+                self._empty_transfer_lbl.pack_forget()
+        else:
+            if not self._empty_transfer_lbl.winfo_exists():
+                self._empty_transfer_lbl = tk.Label(
+                    self.transfers_frame, text="空闲",
+                    bg=C_CARD, fg=C_DIM_2,
+                    font=(self.FONT_UI, 10), anchor="w")
+            self._empty_transfer_lbl.pack(anchor="w", pady=2)
+
+        # 更新或创建行
         for t in items:
             tid = t["id"]
-            if tid in self._transfer_rows:
-                self._update_transfer_row(tid, t)
-            else:
-                self._create_transfer_row(tid, t)
+            row = self._transfer_rows.get(tid)
+            if row is None:
+                row = _TransferRow(self.transfers_frame,
+                                    font=self.FONT_UI,
+                                    mono_font=self.FONT_MONO)
+                row.set_close_handler(
+                    lambda _tid=tid: self._remove_transfer_row(_tid))
+                self._transfer_rows[tid] = row
+            row.update(t, fmt_bytes, fmt_speed)
 
-        order_now = [t["id"] for t in items]
-        if order_now != self._transfer_order:
-            self._transfer_order = order_now
-            for tid in order_now:
-                self._transfer_rows[tid]["frame"].pack_forget()
-            for tid in order_now:
-                self._transfer_rows[tid]["frame"].pack(fill="x", pady=3)
-
-        if not items:
-            if self._transfer_empty is None:
-                self._transfer_empty = ttk.Label(
-                    self.transfers_frame, text="空闲",
-                    foreground="#9ca3af")
-                self._transfer_empty.pack(anchor="w")
-        else:
-            if self._transfer_empty is not None:
-                try:
-                    self._transfer_empty.destroy()
-                except tk.TclError:
-                    pass
-                self._transfer_empty = None
+        # 重新排列
+        if current_ids != self._transfer_order:
+            self._transfer_order = current_ids
+            for tid in current_ids:
+                self._transfer_rows[tid].pack_forget()
+            for tid in current_ids:
+                self._transfer_rows[tid].pack(fill="x", pady=5)
 
     def _remove_transfer_row(self, tid):
-        """从面板移除指定传输记录（不中断底层连接）。"""
         with TRANSFERS_LOCK:
             TRANSFERS.pop(tid, None)
 
-    def _create_transfer_row(self, tid, t):
-        row = ttk.Frame(self.transfers_frame)
-        row.columnconfigure(0, weight=0, minsize=180)
-        row.columnconfigure(1, weight=1)
-        row.columnconfigure(2, weight=0, minsize=190)
-        row.columnconfigure(3, weight=0)
+    def _clear_done_transfers(self):
+        with TRANSFERS_LOCK:
+            for tid, t in list(TRANSFERS.items()):
+                if t["done"]:
+                    del TRANSFERS[tid]
 
-        arrow = "⬆" if t["dir"] == "up" else "⬇"
-        name = t["name"]
-        if len(name) > 26:
-            name = name[:12] + "…" + name[-11:]
-
-        name_lbl = ttk.Label(row, text=f"{arrow} {name}",
-                             anchor="w", font=("", 9))
-        name_lbl.grid(row=0, column=0, sticky="w", padx=(0, 8))
-
-        pb = ttk.Progressbar(row, mode="determinate", maximum=100.0, value=0)
-        pb.grid(row=0, column=1, sticky="ew", padx=(0, 8))
-
-        slbl = ttk.Label(row, text="", anchor="e",
-                         foreground="#374151", font=("", 9))
-        slbl.grid(row=0, column=2, sticky="e")
-
-        # 手动清理按钮：移除该条进度记录（不中断底层连接）
-        close_btn = ttk.Label(row, text="✕", cursor="hand2",
-                              foreground="#9ca3af", font=("", 10),
-                              padding=(4, 0))
-        close_btn.grid(row=0, column=3, sticky="e", padx=(8, 0))
-        close_btn.bind("<Button-1>",
-                       lambda e, _tid=tid: self._remove_transfer_row(_tid))
-        close_btn.bind(
-            "<Enter>",
-            lambda e, w=close_btn: w.configure(foreground="#ef4444"))
-        close_btn.bind(
-            "<Leave>",
-            lambda e, w=close_btn: w.configure(foreground="#9ca3af"))
-
-        self._transfer_rows[tid] = {
-            "frame": row, "name": name_lbl,
-            "bar": pb, "status": slbl,
-        }
-
-    def _update_transfer_row(self, tid, t):
-        w = self._transfer_rows.get(tid)
-        if not w:
-            return
-        pct = (t["received"] / max(t["size"], 1)) * 100
-        try:
-            w["bar"]["value"] = pct
-        except tk.TclError:
-            return
-
-        arrow = "⬆" if t["dir"] == "up" else "⬇"
-        name = t["name"]
-        if len(name) > 26:
-            name = name[:12] + "…" + name[-11:]
-        new_name = f"{arrow} {name}"
-        if w["name"].cget("text") != new_name:
-            w["name"].configure(text=new_name)
-
-        if t.get("paused"):
-            status = f"⏸ 已暂停 · {fmt_bytes(t['received'])}"
-            color = "#d97706"
-        elif t["done"]:
-            if t["ok"]:
-                status = "✓ 完成"; color = "#16a34a"
-            else:
-                status = "✗ 失败"; color = "#b91c1c"
-        else:
-            sp = t.get("speed", 0.0)
-            if sp > 1000:
-                remain = (t["size"] - t["received"]) / sp
-                status = f"{pct:.0f}%  {fmt_speed(sp)}  剩余 {int(remain)}s"
-            else:
-                status = f"{pct:.0f}%"
-            color = "#374151"
-
-        if w["status"].cget("text") != status:
-            w["status"].configure(text=status, foreground=color)
+    # ------------------------------------------------------------------
+    #  日志
+    # ------------------------------------------------------------------
 
     def _refresh_logs(self):
         with LOG_LOCK:
@@ -3327,71 +3807,37 @@ class App:
             self.logs_text.configure(state="normal")
             for it in items:
                 t = time.strftime("%H:%M:%S", time.localtime(it["t"]))
-                self.logs_text.insert("end", f"[{t}] ", ("time",))
+                self.logs_text.insert("end", f"{t}  ", ("time",))
                 msg = it["msg"]
-                tag = ()
                 if msg.startswith("✓"):
                     tag = ("ok",)
-                elif msg.startswith("⚠️") or msg.startswith("[error]"):
+                elif msg.startswith("[error]") or msg.startswith("✗"):
+                    tag = ("error",)
+                elif msg.startswith("⚠️"):
                     tag = ("warn",)
+                else:
+                    tag = ()
                 self.logs_text.insert("end", msg + "\n", tag)
             total = int(self.logs_text.index("end-1c").split(".")[0])
             if total > 800:
                 self.logs_text.delete("1.0", f"{total - 600}.0")
             self.logs_text.see("end")
             self.logs_text.configure(state="disabled")
+
         if max_id > self.last_log_id:
             self.last_log_id = max_id
 
-    def _draw_qr(self, ips):
-        c = self.qr_canvas
-        c.delete("all")
-        if not ips:
-            c.create_text(120, 110, text="⚠️", font=("", 32), fill="#d97706")
-            c.create_text(120, 150, text="未检测到局域网 IP",
-                          font=("", 10), fill="#6b7280")
-            c.create_text(120, 172, text="请连接局域网",
-                          font=("", 9), fill="#9ca3af")
-            self.qr_hint.configure(text="等待网络连接…")
-            return
-        url = f"http://{ips[0]}:{self.port}/"
-        try:
-            matrix = qr_encode(url)
-        except Exception as e:
-            c.create_text(120, 120, text=f"二维码生成失败\n{e}",
-                          font=("", 9), fill="#b91c1c")
-            self.qr_hint.configure(text="")
-            return
-        n = len(matrix)
-        quiet = 2
-        total = n + 2 * quiet
-        size = 240
-        cell = size / total
-        for y in range(n):
-            for x in range(n):
-                if matrix[y][x]:
-                    x0 = (x + quiet) * cell
-                    y0 = (y + quiet) * cell
-                    c.create_rectangle(x0, y0,
-                                        x0 + cell + 0.5, y0 + cell + 0.5,
-                                        fill="#000000", outline="#000000")
-        self.qr_hint.configure(text=url)
+    def _clear_logs(self):
+        with LOG_LOCK:
+            LOG_BUFFER.clear()
+            self.last_log_id = LOG_COUNTER
+        self.logs_text.configure(state="normal")
+        self.logs_text.delete("1.0", "end")
+        self.logs_text.configure(state="disabled")
 
-    def _copy_url(self, url):
-        try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(url)
-            self._flash_status(f"✓ 已复制 {url}")
-        except tk.TclError:
-            pass
-
-    def _flash_status(self, text):
-        self.status_var.set(text)
-        self.status_label.configure(foreground="#2563eb")
-        self.root.after(2000, lambda: (
-            self.status_var.set("● 运行中"),
-            self.status_label.configure(foreground="#16a34a"),
-        ))
+    # ------------------------------------------------------------------
+    #  操作
+    # ------------------------------------------------------------------
 
     def _open_folder(self):
         try:
@@ -3432,7 +3878,10 @@ class App:
     def on_close(self):
         self.stop_event.set()
         self._stop_server()
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
 
 # =====================================================================
@@ -3440,6 +3889,17 @@ class App:
 # =====================================================================
 
 def main():
+    # Windows 高 DPI 支持：在创建 root 之前设置
+    if sys.platform == "win32":
+        try:
+            from ctypes import windll
+            windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            try:
+                windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
     _has_web = (
         os.path.isdir(os.path.join(BASE_DIR, "web")) or
         os.path.isdir(os.path.join(BUNDLE_DIR, "web"))
