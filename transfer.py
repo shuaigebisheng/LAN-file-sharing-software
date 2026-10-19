@@ -1194,7 +1194,14 @@ def _get_to_names(info):
     return [old] if old else []
 
 
-def set_file_meta(name, from_key, to_keys, from_name, to_names, cid=None):
+def set_file_meta(name, from_key, to_keys, from_name, to_names,
+                  cid=None, fresh=False):
+    """
+    写入文件元数据。
+
+    fresh=True 表示磁盘上这是全新文件（老文件已被删除或改名），
+    此时必须重置 added_at；否则沿用旧的 added_at，以保持"最新上传"排序稳定。
+    """
     with META_LOCK:
         m = _load_meta()
         old = m.get(name, {})
@@ -1210,7 +1217,7 @@ def set_file_meta(name, from_key, to_keys, from_name, to_names, cid=None):
         elif old.get("cid"):
             rec["cid"] = old["cid"]
 
-        if old.get("added_at"):
+        if not fresh and old.get("added_at"):
             rec["added_at"] = old["added_at"]
         else:
             rec["added_at"] = time.time()
@@ -2626,8 +2633,10 @@ class Handler(BaseHTTPRequestHandler):
             final_name = os.path.basename(target)
             from_name = get_client_name(from_client) or from_client
             to_names = [get_client_name(t) or t for t in to_clients]
+            # fresh=True：磁盘上这是全新文件，必须重置 added_at，
+            # 否则同名文件被删除后重新上传仍会保留旧的排序时间。
             set_file_meta(final_name, from_client, to_clients,
-                          from_name, to_names, cid)
+                          from_name, to_names, cid, fresh=True)
 
             _generate_thumbnail_async(target, final_name)
 
@@ -2837,6 +2846,7 @@ class Handler(BaseHTTPRequestHandler):
         from_name = get_client_name(me) or me
         to_names = [get_client_name(t) or t for t in to_clients]
 
+        # 修改权限不应改变"上传时间"，fresh 保持默认 False
         set_file_meta(name, me, to_clients, from_name, to_names)
 
         if to_clients:
